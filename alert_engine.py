@@ -160,6 +160,7 @@ def backfill_history(days=180):
     print(f"Starting backfill for last {days} days...")
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days)
+    end = now - timedelta(hours=2) # Stop 2 hours ago to avoid conflicts with the live cron
     
     # Temporarily disable email sending
     global _send_alert
@@ -168,7 +169,7 @@ def backfill_history(days=180):
     _send_alert = dummy_send_alert
     
     try:
-        calls = fetch_calls(start, now)
+        calls = fetch_calls(start, end)
         print(f"Fetched {len(calls)} total calls from Ringba. Processing...")
         for c in sorted(calls, key=lambda x: x["started_at"]):
             process_call(c)
