@@ -155,5 +155,29 @@ def run():
     
     print("Done.")
 
+def backfill_history(days=180):
+    """Pulls historical calls to populate the database without sending emails."""
+    print(f"Starting backfill for last {days} days...")
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=days)
+    
+    # Temporarily disable email sending
+    global _send_alert
+    original_send_alert = _send_alert
+    def dummy_send_alert(*args, **kwargs): pass
+    _send_alert = dummy_send_alert
+    
+    try:
+        calls = fetch_calls(start, now)
+        print(f"Fetched {len(calls)} total calls from Ringba. Processing...")
+        for c in sorted(calls, key=lambda x: x["started_at"]):
+            process_call(c)
+        print("Backfill complete.")
+    except Exception as e:
+        print("Backfill error:", e)
+    finally:
+        # Restore email sending
+        _send_alert = original_send_alert
+
 if __name__ == "__main__":
     run()
