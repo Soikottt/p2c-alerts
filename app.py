@@ -71,7 +71,7 @@ with tabs[1]:
     else:
         edited_pubs = st.data_editor(
             df_pubs, 
-            num_rows="fixed", 
+            num_rows="dynamic", 
             use_container_width=True,
             disabled=["total_calls", "last_call_at"],
             column_config={
@@ -210,6 +210,15 @@ with tabs[7]:
             db.x("INSERT INTO settings (key, value) VALUES ('admin_email', :e) ON CONFLICT (key) DO UPDATE SET value = :e", e=new_admin)
             st.success("✅ Settings saved!")
             st.rerun()
+
+    st.divider()
+    st.subheader("Sync Historical Data")
+    st.caption("Pull calls from the past 6 months to populate your empty dashboard. This will NOT send emails.")
+    if st.button("⬇️ Sync Last 6 Months from Ringba"):
+        with st.spinner("Pulling 6 months of data... This may take a minute."):
+            alert_engine.backfill_history(days=180)
+        st.success("✅ Historical data synced! Check your Dashboard tab.")
+        st.rerun()    
             
     st.divider()
     st.subheader("Manual Engine Run")
