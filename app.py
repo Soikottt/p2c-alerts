@@ -306,8 +306,8 @@ with tabs[7]:
         headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
         
         body = {
-            "reportStart": (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "reportEnd": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "reportStart": (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "reportEnd": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "valueColumns": [
                 {"column": "callDt"}, 
                 {"column": "inboundCallId"},
