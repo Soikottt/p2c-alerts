@@ -39,30 +39,31 @@ def fetch_calls(start_time, end_time):
             raise Exception(f"Ringba API Error {response.status_code}: {response.text}")
             
         data = response.json()
-        
-        # --- THE FIX: Ringba now uses "report" -> "records" instead of "callLog" -> "data" ---
-        raw_calls = []
-        if "callLog" in data and "data" in data["callLog"]:
-            raw_calls = data["callLog"]["data"]
-        elif "report" in data and "records" in data["report"]:
-            raw_calls = data["report"]["records"]
+        raw_calls = data.get("callLog", {}).get("data", data.get("report", {}).get("records", []))
             
         if not raw_calls:
-            break # No more calls
+            break
             
         for row in raw_calls:
-            # The data might be flat or nested under "columns"
             cols = row.get("columns", row)
             
-            # Sometimes callDt is a timestamp number, sometimes a string. We handle both.
+            # --- FIX: Handle millisecond timestamps AND strings ---
             dt_val = cols.get("callDt")
             if isinstance(dt_val, (int, float)):
-                call_dt = datetime.fromtimestamp(dt_val / 1000, tz=timezone.utc)
+                call_dt = datetime.fromtimestamp(dt_val / 1000.0, tz=timezone.utc)
             elif isinstance(dt_val, str):
                 call_dt = isoparse(dt_val)
             else:
                 call_dt = datetime.now(timezone.utc)
             
+            # --- FIX: Handle None for connected status ---
+            connected_raw = cols.get("hasConnected")
+            is_connected = bool(connected_raw) if connected_raw is not None else False
+
+            # Handle None for duration
+            dur_raw = cols.get("connectedCallLengthInSeconds")
+            duration = int(dur_raw) if dur_raw is not None else 0
+
             all_parsed_calls.append({
                 "call_id": str(cols.get("inboundCallId", "")),
                 "started_at": call_dt,
@@ -71,12 +72,12 @@ def fetch_calls(start_time, end_time):
                 "buyer_id": str(cols.get("buyerId", "")),
                 "buyer_name": cols.get("buyer", "Unknown Buyer"),
                 "did": str(cols.get("inboundPhoneNumber", "")),
-                "connected": bool(cols.get("hasConnected", False)),
-                "duration": int(cols.get("connectedCallLengthInSeconds", 0) or 0)
+                "connected": is_connected,
+                "duration": duration
             })
             
         if len(raw_calls) < 500:
-            break # Last page reached
+            break
             
         page += 1
         
