@@ -291,3 +291,65 @@ with tabs[7]:
                     st.code(res.text)
             except Exception as e:
                 st.error(f"❌ Python Error: {e}")
+                
+    st.divider()
+    st.subheader("Accuracy Test")
+    if st.button("🔍 Run Accuracy Test"):
+        from datetime import datetime, timezone
+        from dateutil.parser import isoparse
+        import requests
+        import config
+        
+        st.write("Fetching 5 most recent calls directly from Ringba...")
+        
+        url = f"https://api.ringba.com/v2/{config.RINGBA_ACCT}/calllogs"
+        headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
+        
+        body = {
+            "reportStart": (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "reportEnd": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valueColumns": [
+                {"column": "callDt"}, 
+                {"column": "inboundCallId"},
+                {"column": "hasConnected"},
+                {"column": "connectedCallLengthInSeconds"}
+            ],
+            "orderByColumns": [{"column": "callDt", "direction": "desc"}],
+            "pagination": {"page": 1, "pageSize": 5}
+        }
+        
+        try:
+            res = requests.post(url, headers=headers, json=body, timeout=15)
+            data = res.json()
+            
+            # Handle both old and new Ringba response formats
+            raw_calls = data.get("callLog", {}).get("data", data.get("report", {}).get("records", []))
+            
+            if not raw_calls:
+                st.warning("Ringba returned 0 calls to compare.")
+            else:
+                st.write("### 1. What Ringba says (Raw API):")
+                for row in raw_calls:
+                    cols = row.get("columns", row)
+                    st.write(f"- Call ID: `{cols.get('inboundCallId')}` | Ringba Date Raw: `{cols.get('callDt')}` | Connected: `{cols.get('hasConnected')}`")
+                
+                st.write("### 2. What our Database stored:")
+                # Grab those exact same 5 Call IDs from our database
+                call_ids = [str(row.get("columns", row).get("inboundCallId")) for row in raw_calls]
+                
+                # Build a dynamic query for the 5 IDs
+                placeholders = ", ".join([f":id{i}" for i in range(len(call_ids))])
+                params = {f"id{i}": cid for i, cid in enumerate(call_ids)}
+                
+                db_calls = db.q(f"""
+                    SELECT ringba_call_id, started_at, connected, duration_sec 
+                    FROM calls 
+                    WHERE ringba_call_id IN ({placeholders})
+                """, **params)
+                
+                for row in db_calls:
+                    st.write(f"- Call ID: `{row['ringba_call_id']}` | DB Date: `{row['started_at']}` | Connected: `{row['connected']}` | Duration: `{row['duration_sec']}s`")
+                
+                st.info("Compare the Ringba Date Raw to the DB Date. If they are off by 4 or 5 hours, we have a timezone bug in our parsing.")
+        except Exception as e:
+            st.error(f"Error: {e}")
