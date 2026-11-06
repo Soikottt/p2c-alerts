@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from dateutil.parser import isoparse
 
 def fetch_calls(start_time, end_time):
-    """Fetches ALL calls from Ringba between two datetime objects (handles pagination)."""
     url = f"https://api.ringba.com/v2/{config.RINGBA_ACCT}/calllogs"
     
     headers = {
@@ -36,6 +35,21 @@ def fetch_calls(start_time, end_time):
         }
         
         response = requests.post(url, headers=headers, json=body, timeout=30)
+        
+        # --- DEBUG: Print what's happening to the Streamlit log ---
+        print(f"\n=== DEBUG: Ringba API Call ===")
+        print(f"Account: {config.RINGBA_ACCT}")
+        print(f"Start: {start_time}")
+        print(f"End: {end_time}")
+        print(f"Status: {response.status_code}")
+        try:
+            js = response.json()
+            print(f"Raw callLog data count: {len(js.get('callLog', {}).get('data', []))}")
+            print(f"JSON first 300 chars: {str(js)[:300]}")
+        except Exception as e:
+            print(f"JSON parse fail: {e}")
+        # ---------------------------------------------------------
+        
         if response.status_code != 200:
             raise Exception(f"Ringba API Error {response.status_code}: {response.text}")
             
@@ -43,7 +57,7 @@ def fetch_calls(start_time, end_time):
         raw_calls = data.get("callLog", {}).get("data", [])
         
         if not raw_calls:
-            break # No more calls
+            break
             
         for row in raw_calls:
             cols = row.get("columns", {})
@@ -62,7 +76,7 @@ def fetch_calls(start_time, end_time):
             })
             
         if len(raw_calls) < 500:
-            break # We reached the last page
+            break
             
         page += 1
         
