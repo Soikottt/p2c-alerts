@@ -6,23 +6,24 @@ import emailer
 from ringba_client import fetch_calls
 
 NY = ZoneInfo("America/New_York")
-RESET_TIME = timedelta(hours=23, minutes=30) # 11:30 PM EST
+RESET_TIME = timedelta(hours=23, minutes=30)
 
 def get_period_key(period):
-    """Calculates the current period key (e.g., '2026-11-05' or '2026-11')."""
     now = datetime.now(NY)
     if period == "daily":
         return (now - RESET_TIME).strftime("%Y-%m-%d")
     return now.strftime("%Y-%m")
 
 def get_period_start(period):
-    """Calculates the exact datetime when the current period started."""
     now = datetime.now(NY)
     if period == "daily":
         return (now - RESET_TIME).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
 
 def process_call(c):
+    if not c["call_id"]:
+        return
+
     # 1. Check if we already processed this call
     if db.q("SELECT 1 FROM calls WHERE ringba_call_id=:k", k=c["call_id"]):
         return
@@ -114,12 +115,11 @@ def check_inactive_dids():
 
 def _send_alert(alert_type, dedupe_key, subject, body, buyer=None, publisher=None):
     if db.q("SELECT 1 FROM alerts_log WHERE dedupe_key=:k", k=dedupe_key):
-        return # Already sent
+        return 
     
     admin = db.get_setting("admin_email")
     if not admin: return
 
-    # Get CC routing
     route = db.q("SELECT * FROM cc_routing WHERE alert_type=:t", t=alert_type)
     route = route[0] if route else {"cc_buyer": False, "cc_publisher": False}
     
@@ -134,11 +134,8 @@ def _send_alert(alert_type, dedupe_key, subject, body, buyer=None, publisher=Non
 
 def run():
     print(f"[{datetime.now()}] Starting Alert Engine...")
-    
-    # 1. Fetch new calls (lookback 1 hour for safety)
     now = datetime.now(timezone.utc)
     start = now - timedelta(hours=1)
-    
     try:
         calls = fetch_calls(start, now)
         print(f"Fetched {len(calls)} calls from Ringba.")
@@ -147,38 +144,29 @@ def run():
     except Exception as e:
         print("Error fetching calls:", e)
 
-    # 2. Check Caps
     check_caps()
-    
-    # 3. Check Inactive DIDs (runs every time, deduplication handles spam)
     check_inactive_dids()
-    
     print("Done.")
 
-def backfill_history(days=180):
-    """Pulls historical calls to populate the database without sending emails."""
-    print(f"Starting backfill for last {days} days...")
-    now = datetime.now(timezone.utc)
-    start = now - timedelta(days=days)
-    end = now - timedelta(hours=2) # Stop 2 hours ago to avoid conflicts with the live cron
-    
-    # Temporarily disable email sending
+# --- UPDATED BACKFILL FUNCTION ---
+def backfill_history(start_dt, end_dt):
     global _send_alert
     original_send_alert = _send_alert
     def dummy_send_alert(*args, **kwargs): pass
     _send_alert = dummy_send_alert
     
+    message = ""
     try:
-        calls = fetch_calls(start, end)
-        print(f"Fetched {len(calls)} total calls from Ringba. Processing...")
+        calls = fetch_calls(start_dt, end_dt)
+        message = f"Fetched {len(calls)} total calls from Ringba. Processing..."
         for c in sorted(calls, key=lambda x: x["started_at"]):
             process_call(c)
-        print("Backfill complete.")
+        message += "\n✅ Backfill complete."
     except Exception as e:
-        print("Backfill error:", e)
+        message = f"❌ Error during backfill: {e}"
     finally:
-        # Restore email sending
         _send_alert = original_send_alert
+    return message
 
 if __name__ == "__main__":
     run()
