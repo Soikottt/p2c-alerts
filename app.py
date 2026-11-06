@@ -295,19 +295,18 @@ with tabs[7]:
     st.divider()
     st.subheader("Accuracy Test")
     if st.button("🔍 Run Accuracy Test"):
-        from datetime import datetime, timezone
-        from dateutil.parser import isoparse
-        import requests
-        import config
-        
         st.write("Fetching 5 most recent calls directly from Ringba...")
         
         url = f"https://api.ringba.com/v2/{config.RINGBA_ACCT}/calllogs"
         headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
         
+        # Use the clean imports
+        start_time = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        
         body = {
-            "reportStart": (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "reportEnd": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "reportStart": start_time,
+            "reportEnd": end_time,
             "valueColumns": [
                 {"column": "callDt"}, 
                 {"column": "inboundCallId"},
@@ -322,7 +321,6 @@ with tabs[7]:
             res = requests.post(url, headers=headers, json=body, timeout=15)
             data = res.json()
             
-            # Handle both old and new Ringba response formats
             raw_calls = data.get("callLog", {}).get("data", data.get("report", {}).get("records", []))
             
             if not raw_calls:
@@ -334,10 +332,8 @@ with tabs[7]:
                     st.write(f"- Call ID: `{cols.get('inboundCallId')}` | Ringba Date Raw: `{cols.get('callDt')}` | Connected: `{cols.get('hasConnected')}`")
                 
                 st.write("### 2. What our Database stored:")
-                # Grab those exact same 5 Call IDs from our database
                 call_ids = [str(row.get("columns", row).get("inboundCallId")) for row in raw_calls]
                 
-                # Build a dynamic query for the 5 IDs
                 placeholders = ", ".join([f":id{i}" for i in range(len(call_ids))])
                 params = {f"id{i}": cid for i, cid in enumerate(call_ids)}
                 
