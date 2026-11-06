@@ -35,33 +35,33 @@ def fetch_calls(start_time, end_time):
         }
         
         response = requests.post(url, headers=headers, json=body, timeout=30)
-        
-        # --- DEBUG: Print what's happening to the Streamlit log ---
-        print(f"\n=== DEBUG: Ringba API Call ===")
-        print(f"Account: {config.RINGBA_ACCT}")
-        print(f"Start: {start_time}")
-        print(f"End: {end_time}")
-        print(f"Status: {response.status_code}")
-        try:
-            js = response.json()
-            print(f"Raw callLog data count: {len(js.get('callLog', {}).get('data', []))}")
-            print(f"JSON first 300 chars: {str(js)[:300]}")
-        except Exception as e:
-            print(f"JSON parse fail: {e}")
-        # ---------------------------------------------------------
-        
         if response.status_code != 200:
             raise Exception(f"Ringba API Error {response.status_code}: {response.text}")
             
         data = response.json()
-        raw_calls = data.get("callLog", {}).get("data", [])
         
+        # --- THE FIX: Ringba now uses "report" -> "records" instead of "callLog" -> "data" ---
+        raw_calls = []
+        if "callLog" in data and "data" in data["callLog"]:
+            raw_calls = data["callLog"]["data"]
+        elif "report" in data and "records" in data["report"]:
+            raw_calls = data["report"]["records"]
+            
         if not raw_calls:
-            break
+            break # No more calls
             
         for row in raw_calls:
-            cols = row.get("columns", {})
-            call_dt = isoparse(cols.get("callDt")) if cols.get("callDt") else datetime.now(timezone.utc)
+            # The data might be flat or nested under "columns"
+            cols = row.get("columns", row)
+            
+            # Sometimes callDt is a timestamp number, sometimes a string. We handle both.
+            dt_val = cols.get("callDt")
+            if isinstance(dt_val, (int, float)):
+                call_dt = datetime.fromtimestamp(dt_val / 1000, tz=timezone.utc)
+            elif isinstance(dt_val, str):
+                call_dt = isoparse(dt_val)
+            else:
+                call_dt = datetime.now(timezone.utc)
             
             all_parsed_calls.append({
                 "call_id": str(cols.get("inboundCallId", "")),
@@ -76,7 +76,7 @@ def fetch_calls(start_time, end_time):
             })
             
         if len(raw_calls) < 500:
-            break
+            break # Last page reached
             
         page += 1
         
