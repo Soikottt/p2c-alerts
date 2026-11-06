@@ -236,30 +236,42 @@ with tabs[7]:
         import requests
         import config
         
+        # 1. Force UTC time
         now = datetime.now(timezone.utc)
-        start = now - timedelta(days=7) # Look back 7 days instead of 180
+        start = now - timedelta(days=7) 
+        
+        # 2. Format exactly how Ringba expects it
+        start_str = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
         url = f"https://api.ringba.com/v2/{config.RINGBA_ACCT}/calllogs"
         headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
         
         body = {
-            "reportStart": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "reportEnd": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "valueColumns": [{"column": "callDt"}], # Just one column
+            "reportStart": start_str,
+            "reportEnd": end_str,
+            "valueColumns": [{"column": "callDt"}],
+            "formatTimeZone": "America/New_York", # <--- ADDED THIS
             "pagination": {"page": 1, "pageSize": 5}
         }
         
         with st.spinner("Testing..."):
             try:
                 res = requests.post(url, headers=headers, json=body, timeout=15)
-                st.write(f"**Status Code:** {res.status_code}")
                 
-                # Show us the Account ID the app is actually using
-                st.write(f"**Using Account ID:** `{config.RINGBA_ACCT}`") 
+                # Print out exactly what we are sending to Ringba
+                st.write(f"**Account ID:** `{config.RINGBA_ACCT}`")
+                st.write(f"**Sending Start Date:** `{start_str}`")
+                st.write(f"**Sending End Date:** `{end_str}`")
+                st.write(f"**Status Code:** {res.status_code}")
                 
                 if res.status_code == 200:
                     data = res.json()
                     total = data.get("totalCount", 0)
-                    st.success(f"✅ Connected! Ringba says there are {total} calls in the last 7 days.")
+                    if total == 0:
+                        st.warning(f"⚠️ Ringba connected, but found 0 calls for this date range.")
+                    else:
+                        st.success(f"✅ Connected! Ringba says there are {total} calls in the last 7 days.")
                     st.json(data.get("callLog", {}).get("data", [])[:1])
                 else:
                     st.error("❌ Failed to connect. Here is the exact error from Ringba:")
