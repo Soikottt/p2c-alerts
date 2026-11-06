@@ -328,7 +328,7 @@ with tabs[7]:
                 st.warning("Ringba returned 0 calls to compare.")
             else:
                 st.write("### 1. What Ringba says (Raw API):")
-                for row in raw_calls:
+                for row in raw_calls[:5]:
                     cols = row.get("columns", row)
                     st.write(f"- Call ID: `{cols.get('inboundCallId')}` | Ringba Date Raw: `{cols.get('callDt')}` | Connected: `{cols.get('hasConnected')}`")
                 
