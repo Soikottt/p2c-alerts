@@ -218,9 +218,11 @@ with tabs[7]:
     
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
+        start_date = datetime.date("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
     with col2:
-        end_date = st.date_input("End Date", value=datetime.date.today())
+        end_date = datetime.date("End Date", value=datetime.date.today())
+        start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+            end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc)
         
     if st.button("⬇️ Sync Historical Data from Ringba"):
         if start_date > end_date:
