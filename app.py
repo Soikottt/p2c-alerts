@@ -236,8 +236,9 @@ with tabs[7]:
         import requests
         import config
         
+        # 1. Ask for just the last 24 hours
         now = datetime.now(timezone.utc)
-        start = now - timedelta(days=7) 
+        start = now - timedelta(hours=24) 
         
         start_str = start.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -249,8 +250,6 @@ with tabs[7]:
             "reportStart": start_str,
             "reportEnd": end_str,
             "valueColumns": [{"column": "callDt"}],
-            "formatTimeZone": "America/New_York",
-            "formatTimezoneOffset": -300, # <--- ADDED THIS (EST is -5 hours = -300 minutes)
             "pagination": {"page": 1, "pageSize": 5}
         }
         
@@ -258,17 +257,21 @@ with tabs[7]:
             try:
                 res = requests.post(url, headers=headers, json=body, timeout=15)
                 
-                st.write(f"**Account ID:** `{config.RINGBA_ACCT}`")
                 st.write(f"**Status Code:** {res.status_code}")
+                
+                # PRINT THE EXACT TOKEN (just the last 5 characters) so we can verify it matches
+                st.write(f"**Token ends in:** `...{str(config.RINGBA_TOKEN)[-5:]}`")
+                st.write(f"**Account ID:** `{config.RINGBA_ACCT}`")
                 
                 if res.status_code == 200:
                     data = res.json()
                     total = data.get("totalCount", 0)
                     if total == 0:
-                        st.warning(f"⚠️ Ringba connected, but found 0 calls for this date range.")
+                        st.warning(f"⚠️ Ringba connected, but found 0 calls in the last 24 hours.")
+                        st.write("Here is the exact response from Ringba:")
+                        st.json(data) # Show the FULL response, not just the data
                     else:
-                        st.success(f"✅ Connected! Ringba says there are {total} calls in the last 7 days.")
-                    st.json(data.get("callLog", {}).get("data", [])[:1])
+                        st.success(f"✅ Connected! Ringba says there are {total} calls in the last 24 hours.")
                 else:
                     st.error("❌ Failed to connect. Here is the exact error from Ringba:")
                     st.code(res.text)
