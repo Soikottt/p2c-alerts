@@ -236,11 +236,9 @@ with tabs[7]:
         import requests
         import config
         
-        # 1. Force UTC time
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=7) 
         
-        # 2. Format exactly how Ringba expects it
         start_str = start.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         
@@ -251,7 +249,8 @@ with tabs[7]:
             "reportStart": start_str,
             "reportEnd": end_str,
             "valueColumns": [{"column": "callDt"}],
-            "formatTimeZone": "America/New_York", # <--- ADDED THIS
+            "formatTimeZone": "America/New_York",
+            "formatTimezoneOffset": -300, # <--- ADDED THIS (EST is -5 hours = -300 minutes)
             "pagination": {"page": 1, "pageSize": 5}
         }
         
@@ -259,10 +258,7 @@ with tabs[7]:
             try:
                 res = requests.post(url, headers=headers, json=body, timeout=15)
                 
-                # Print out exactly what we are sending to Ringba
                 st.write(f"**Account ID:** `{config.RINGBA_ACCT}`")
-                st.write(f"**Sending Start Date:** `{start_str}`")
-                st.write(f"**Sending End Date:** `{end_str}`")
                 st.write(f"**Status Code:** {res.status_code}")
                 
                 if res.status_code == 200:
@@ -278,4 +274,3 @@ with tabs[7]:
                     st.code(res.text)
             except Exception as e:
                 st.error(f"❌ Python Error: {e}")
-    
