@@ -228,3 +228,39 @@ with tabs[7]:
         with st.spinner("Running engine..."):
             alert_engine.run()
         st.success("✅ Engine finished! Check the Alert Log tab.")
+        st.divider()
+    st.subheader("API Connection Test")
+    
+    if st.button("🧪 Test Ringba Connection"):
+        from datetime import datetime, timezone, timedelta
+        import requests
+        from dateutil.parser import isoparse
+        import config
+        
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=180)
+        url = f"https://api.ringba.com/v2/{config.RINGBA_ACCT}/calllogs"
+        headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
+        
+        body = {
+            "reportStart": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "reportEnd": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "valueColumns": [{"column": "callDt"}],
+            "pagination": {"page": 1, "pageSize": 5}
+        }
+        
+        with st.spinner("Testing..."):
+            try:
+                res = requests.post(url, headers=headers, json=body, timeout=15)
+                st.write(f"**Status Code:** {res.status_code}")
+                if res.status_code == 200:
+                    data = res.json()
+                    total = data.get("totalCount", 0)
+                    st.success(f"✅ Connected! Ringba says there are {total} calls in the last 6 months.")
+                    st.write("Here is a sample of the raw data returned:")
+                    st.json(data.get("callLog", {}).get("data", [])[:1])
+                else:
+                    st.error("❌ Failed to connect. Here is the exact error from Ringba:")
+                    st.code(res.text)
+            except Exception as e:
+                st.error(f"❌ Python Error: {e}")
