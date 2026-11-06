@@ -1,3 +1,4 @@
+import datetime
 import streamlit as st
 import pandas as pd
 import db
@@ -213,12 +214,25 @@ with tabs[7]:
 
     st.divider()
     st.subheader("Sync Historical Data")
-    st.caption("Pull calls from the past 6 months to populate your empty dashboard. This will NOT send emails.")
-    if st.button("⬇️ Sync Last 6 Months from Ringba"):
-        with st.spinner("Pulling 6 months of data... This may take a minute."):
-            alert_engine.backfill_history(days=180)
-        st.success("✅ Historical data synced! Check your Dashboard tab.")
-        st.rerun()    
+    st.caption("Pull past calls from Ringba to populate your dashboard. This will NOT send emails.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
+    with col2:
+        end_date = st.date_input("End Date", value=datetime.date.today())
+        
+    if st.button("⬇️ Sync Historical Data from Ringba"):
+        if start_date > end_date:
+            st.error("❌ Start date must be before end date.")
+        else:
+            start_dt = datetime.datetime.combine(start_date, datetime.time.min).replace(tzinfo=datetime.timezone.utc)
+            end_dt = datetime.datetime.combine(end_date, datetime.time.max).replace(tzinfo=datetime.timezone.utc)
+            
+            with st.spinner(f"Pulling data from {start_date} to {end_date}..."):
+                result_msg = alert_engine.backfill_history(start_dt, end_dt)
+            st.success(result_msg)
+            st.rerun()  
             
     st.divider()
     st.subheader("Manual Engine Run")
