@@ -218,18 +218,16 @@ with tabs[7]:
     
     col1, col2 = st.columns(2)
     with col1:
-        start_date = datetime.date("Start Date", value=datetime.date.today() - datetime.timedelta(days=30))
+        start_date = st.date_input("Start Date", value=datetime.today() - timedelta(days=30))
     with col2:
-        end_date = datetime.date("End Date", value=datetime.date.today())
-        start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-            end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+        end_date = st.date_input("End Date", value=datetime.today())
         
     if st.button("⬇️ Sync Historical Data from Ringba"):
         if start_date > end_date:
             st.error("❌ Start date must be before end date.")
         else:
-            start_dt = datetime.datetime.combine(start_date, datetime.time.min).replace(tzinfo=datetime.timezone.utc)
-            end_dt = datetime.datetime.combine(end_date, datetime.time.max).replace(tzinfo=datetime.timezone.utc)
+            start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+            end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc)
             
             with st.spinner(f"Pulling data from {start_date} to {end_date}..."):
                 result_msg = alert_engine.backfill_history(start_dt, end_dt)
