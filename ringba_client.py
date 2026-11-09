@@ -173,8 +173,9 @@ def fetch_range(start, end):
         ]]
 
     all_records = []
+    seen_ids = set() # Safety: prevents infinite loops
     offset = 0
-    page_size = 100
+    size = 100  # Ask for 100 at a time
 
     while True:
         body = {
@@ -183,8 +184,8 @@ def fetch_range(start, end):
             "valueColumns": columns,
             "orderByColumns": [{"column": "callDt", "direction": "asc"}],
             "formatTimeZone": "America/New_York",
-            "offset": offset,          # <--- USING OFFSET INSTEAD OF PAGE
-            "pageSize": page_size
+            "offset": offset,  # <--- RINGBA USES OFFSET
+            "size": size       # <--- RINGBA USES SIZE
         }
 
         # Retry logic for Rate Limits (429)
@@ -209,6 +210,7 @@ def fetch_range(start, end):
             raise RingbaError(f"Ringba API Error {response.status_code}: {response.text[:300]}")
 
         data = response.json()
+        # Handle both response formats (callLog/data or report/records)
         raw_calls = data.get("callLog", {}).get("data", data.get("report", {}).get("records", []))
             
         if not raw_calls:
@@ -217,15 +219,19 @@ def fetch_range(start, end):
         # Print to the GitHub Action log so you can see the progress
         print(f"  -> Fetched {len(raw_calls)} calls (Offset: {offset})...")
 
+        new_records_this_page = 0
         for row in raw_calls:
             cid = as_str(extract_field(row, "call_id"))
-            if not cid:
+            if not cid or cid in seen_ids:
                 continue
             
             when = parse_when(as_str(extract_field(row, "call_iso")), extract_field(row, "call_date"))
             if not when:
                 continue
 
+            seen_ids.add(cid)
+            new_records_this_page += 1
+            
             all_records.append({
                 "call_id": cid,
                 "call_at": when,
@@ -253,16 +259,15 @@ def fetch_range(start, end):
                 "telco_cost": as_num(extract_field(row, "telco_cost")),
             })
 
-        # If the API returned less than the page size, we've reached the end of the day
-        if len(raw_calls) < page_size:
+        # If the API returns the exact same calls again (ignoring offset), stop to prevent infinite loop
+        if new_records_this_page == 0:
             break
             
-        offset += page_size
+        offset += size
         time.sleep(1) # Prevent rate limits between pages
 
     report = {"rows": len(all_records), "skipped": 0, "mapped": list(ALIASES.keys()), "missing": []}
     return all_records, report
-
 
 def test_connection(hours=3):
     """Used by the Settings button. Returns a plain dict you can show on screen."""
