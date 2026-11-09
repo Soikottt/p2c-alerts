@@ -173,8 +173,8 @@ def fetch_range(start, end):
         ]]
 
     all_records = []
-    seen_ids = set() # Safety: prevents infinite loops
-    page = 1
+    offset = 0
+    page_size = 100
 
     while True:
         body = {
@@ -183,7 +183,8 @@ def fetch_range(start, end):
             "valueColumns": columns,
             "orderByColumns": [{"column": "callDt", "direction": "asc"}],
             "formatTimeZone": "America/New_York",
-            "pagination": {"page": page, "pageSize": 100}
+            "offset": offset,          # <--- USING OFFSET INSTEAD OF PAGE
+            "pageSize": page_size
         }
 
         # Retry logic for Rate Limits (429)
@@ -211,21 +212,20 @@ def fetch_range(start, end):
         raw_calls = data.get("callLog", {}).get("data", data.get("report", {}).get("records", []))
             
         if not raw_calls:
-            break
+            break # No more calls for this day
 
-        new_records_this_page = 0
+        # Print to the GitHub Action log so you can see the progress
+        print(f"  -> Fetched {len(raw_calls)} calls (Offset: {offset})...")
+
         for row in raw_calls:
             cid = as_str(extract_field(row, "call_id"))
-            if not cid or cid in seen_ids:
+            if not cid:
                 continue
             
             when = parse_when(as_str(extract_field(row, "call_iso")), extract_field(row, "call_date"))
             if not when:
                 continue
 
-            seen_ids.add(cid)
-            new_records_this_page += 1
-            
             all_records.append({
                 "call_id": cid,
                 "call_at": when,
@@ -253,11 +253,11 @@ def fetch_range(start, end):
                 "telco_cost": as_num(extract_field(row, "telco_cost")),
             })
 
-        # If the API returns the exact same calls (ignoring pagination), stop to prevent infinite loop
-        if new_records_this_page == 0:
+        # If the API returned less than the page size, we've reached the end of the day
+        if len(raw_calls) < page_size:
             break
             
-        page += 1
+        offset += page_size
         time.sleep(1) # Prevent rate limits between pages
 
     report = {"rows": len(all_records), "skipped": 0, "mapped": list(ALIASES.keys()), "missing": []}
