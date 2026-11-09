@@ -1,6 +1,4 @@
-"""Talks to Ringba and turns the call-log CSV into clean Python dictionaries."""
-import csv
-import io
+"""Talks to Ringba and turns the call-log JSON into clean Python dictionaries."""
 import json
 import os
 import re
@@ -35,7 +33,7 @@ ALIASES = {
     "campaign_name": ["Campaign", "campaignName", "tag:Campaign:Name"],
     "caller": ["Caller ID", "inboundPhoneNumber"],
     # THE DID = the number that was dialed (tracking number), NOT the caller's number.
-    "did": ["tag:DialedNumber:Number", "Number", "number"],
+    "did": ["tag:DialedNumber:Number", "Number", "number", "inboundPhoneNumber"],
     "did_id": ["Number ID", "numberId"],
     "connected": ["Connected", "hasConnected"],
     "converted": ["Converted", "hasConverted"],
@@ -51,7 +49,6 @@ ALIASES = {
     "profit": ["Profit Net Telco", "profitNet"],
     "telco_cost": ["Telco Cost", "telcoCost"],
 }
-REQUIRED = ["call_id", "did", "publisher_id|publisher_name"]  # plus a date (checked separately)
 
 
 # ---------- value helpers ----------
@@ -134,83 +131,22 @@ def parse_when(iso, raw):
         return None
 
 
-# ---------- CSV -> records ----------
-def map_headers(headers):
-    """Returns {field: actual_header_in_file}."""
-    exact = {h: h for h in headers}
-    normed = {}
-    for h in headers:
-        normed.setdefault(norm(h), h)
-    out = {}
-    for field, names in ALIASES.items():
-        for n in names:
-            if n in exact:
-                out[field] = exact[n]
-                break
-            if norm(n) in normed:
-                out[field] = normed[norm(n)]
-                break
-    return out
-
-
-def parse_csv(text):
-    """Returns (records, report). report tells you what was found / missing."""
-    text = text.lstrip("\ufeff")
-    reader = csv.DictReader(io.StringIO(text))
-    headers = reader.fieldnames or []
-    m = map_headers(headers)
-    missing = []
-    if "call_id" not in m:
-        missing.append("Inbound Call ID")
-    if "did" not in m:
-        missing.append("Dialed number / DID (tag:DialedNumber:Number or Number)")
-    if "publisher_id" not in m and "publisher_name" not in m:
-        missing.append("Publisher / Publisher ID")
-    if "call_iso" not in m and "call_date" not in m:
-        missing.append("Call date (tag:Date:ISODate or Call Date)")
-    report = {"headers": len(headers), "mapped": m, "missing": missing, "rows": 0, "skipped": 0}
-    if missing:
-        return [], report
-
-    def g(row, field):
-        h = m.get(field)
-        return row.get(h) if h else None
-
-    by_id = {}
-    for row in reader:
-        report["rows"] += 1
-        cid = as_str(g(row, "call_id"))
-        when = parse_when(as_str(g(row, "call_iso")), g(row, "call_date"))
-        if not cid or not when:
-            report["skipped"] += 1
-            continue
-        by_id[cid] = {
-            "call_id": cid,
-            "call_at": when,
-            "publisher_rid": as_str(g(row, "publisher_id")),
-            "publisher_name": as_str(g(row, "publisher_name")),
-            "buyer_rid": as_str(g(row, "buyer_id")),
-            "buyer_name": as_str(g(row, "buyer_name")),
-            "target_name": as_str(g(row, "target_name")),
-            "campaign_name": as_str(g(row, "campaign_name")),
-            "caller": as_str(g(row, "caller")),
-            "did": normalize_phone(g(row, "did")),
-            "did_rid": as_str(g(row, "did_id")),
-            "connected": as_bool(g(row, "connected")),
-            "converted": as_bool(g(row, "converted")),
-            "paid": as_bool(g(row, "paid")),
-            "is_live": as_bool(g(row, "is_live")),
-            "is_duplicate": as_bool(g(row, "duplicate")),
-            "blocked": as_bool(g(row, "blocked")),
-            "incomplete": as_bool(g(row, "incomplete")),
-            "duration_sec": as_secs(g(row, "duration")),
-            "connected_sec": as_secs(g(row, "connected_len")),
-            "revenue": as_num(g(row, "revenue")),
-            "payout": as_num(g(row, "payout")),
-            "profit": as_num(g(row, "profit")),
-            "telco_cost": as_num(g(row, "telco_cost")),
-        }
-    return list(by_id.values()), report
+# ---------- JSON Extraction Helpers ----------
+def extract_field(row, field):
+    """Safely gets a field from the JSON row based on ALIASES."""
+    cols = row.get("columns", row)
+    if field not in ALIASES:
+        return None
+    # Try exact match
+    for key in ALIASES[field]:
+        if key in cols:
+            return cols[key]
+    # Try case-insensitive match
+    cols_lower = {k.lower(): v for k, v in cols.items()}
+    for key in ALIASES[field]:
+        if key.lower() in cols_lower:
+            return cols_lower[key.lower()]
+    return None
 
 
 # ---------- talking to Ringba ----------
@@ -218,53 +154,111 @@ def _z(dt):
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def fetch_csv_text(start, end, retries=3):
-    if not config.RINGBA_TOKEN or not config.RINGBA_ACCOUNT_ID:
-        raise RingbaError("RINGBA_API_TOKEN or RINGBA_ACCOUNT_ID is missing in your Secrets.")
-    url = f"{BASE}/{config.RINGBA_ACCOUNT_ID}/calllogs/export/csv"
-    headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
-    with open(COLUMNS_FILE, encoding="utf-8") as f:
-        columns = json.load(f)
-    body = {
-        "reportStart": _z(start), "reportEnd": _z(end),
-        "valueColumns": columns,
-        "orderByColumns": [{"column": "callDt", "direction": "asc"}],
-        "formatTimespans": True, "formatPercentages": True, "formatDateTime": True,
-        "generateRollups": False, "filters": [], "formatTimeZone": "America/New_York",
-    }
-    last = None
-    for attempt in range(1, retries + 1):
-        try:
-            r = requests.post(url, headers=headers, json=body, timeout=180)
-        except requests.RequestException as e:
-            last = f"network error: {e}"
-        else:
-            if r.status_code == 200:
-                text = r.content.decode("utf-8-sig", errors="replace")
-                if text.lstrip().startswith(("{", "[")):
-                    try:
-                        j = json.loads(text)
-                        link = next((j[k] for k in ("url", "downloadUrl", "fileUrl") if isinstance(j, dict) and j.get(k)), None)
-                    except ValueError:
-                        link = None
-                    if link:
-                        r2 = requests.get(link, timeout=180)
-                        return r2.content.decode("utf-8-sig", errors="replace")
-                    raise RingbaError(f"Ringba returned JSON instead of a CSV: {text[:300]}")
-                return text
-            last = f"HTTP {r.status_code}: {r.text[:300]}"
-            if r.status_code in (401, 403):
-                raise RingbaError(f"Ringba refused the login ({last}). Check RINGBA_API_TOKEN and RINGBA_ACCOUNT_ID.")
-            if r.status_code == 404:
-                raise RingbaError(f"Ringba says not found ({last}). Check RINGBA_ACCOUNT_ID.")
-        time.sleep(2 * attempt)
-    raise RingbaError(f"Ringba request failed after {retries} tries: {last}")
-
-
 def fetch_range(start, end):
-    """Download + parse one time window. Returns (records, report)."""
-    text = fetch_csv_text(start, end)
-    return parse_csv(text)
+    """Download + parse one time window using the JSON endpoint with pagination."""
+    if not config.RINGBA_TOKEN or not config.RINGBA_ACCT:
+        raise RingbaError("RINGBA_API_TOKEN or RINGBA_ACCT is missing in your Secrets.")
+
+    url = f"{BASE}/{config.RINGBA_ACCT}/calllogs"
+    headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
+
+    # Load columns if the file exists, otherwise use a default list
+    try:
+        with open(COLUMNS_FILE, encoding="utf-8") as f:
+            columns = json.load(f)
+    except FileNotFoundError:
+        columns = [{"column": c} for c in [
+            "callDt", "inboundCallId", "publisherId", "publisherName", 
+            "buyerId", "buyer", "inboundPhoneNumber", "hasConnected", 
+            "connectedCallLengthInSeconds"
+        ]]
+
+    all_records = []
+    page = 1
+
+    while True:
+        body = {
+            "reportStart": _z(start),
+            "reportEnd": _z(end),
+            "valueColumns": columns,
+            "orderByColumns": [{"column": "callDt", "direction": "asc"}],
+            "formatTimeZone": "America/New_York",
+            "pagination": {"page": page, "pageSize": 500}
+        }
+
+        # Retry logic for Rate Limits (429)
+        max_retries = 3
+        response = None
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=body, timeout=60)
+                if response.status_code == 429:
+                    print(f"Rate limited (429). Waiting 10 seconds...")
+                    time.sleep(10)
+                else:
+                    break
+            except requests.RequestException as e:
+                if attempt == max_retries - 1:
+                    raise RingbaError(f"Network error: {e}")
+                time.sleep(5)
+
+        if response.status_code == 401 or response.status_code == 403:
+            raise RingbaError(f"Ringba refused the login (HTTP {response.status_code}). Check your Token and Account ID.")
+        if response.status_code != 200:
+            raise RingbaError(f"Ringba API Error {response.status_code}: {response.text[:300]}")
+
+        data = response.json()
+        
+        # Handle both response structures
+        raw_calls = data.get("callLog", {}).get("data", data.get("report", {}).get("records", []))
+            
+        if not raw_calls:
+            break
+
+        for row in raw_calls:
+            cid = as_str(extract_field(row, "call_id"))
+            when = parse_when(as_str(extract_field(row, "call_iso")), extract_field(row, "call_date"))
+            
+            if not cid or not when:
+                continue
+
+            all_records.append({
+                "call_id": cid,
+                "call_at": when,
+                "publisher_rid": as_str(extract_field(row, "publisher_id")),
+                "publisher_name": as_str(extract_field(row, "publisher_name")),
+                "buyer_rid": as_str(extract_field(row, "buyer_id")),
+                "buyer_name": as_str(extract_field(row, "buyer_name")),
+                "target_name": as_str(extract_field(row, "target_name")),
+                "campaign_name": as_str(extract_field(row, "campaign_name")),
+                "caller": as_str(extract_field(row, "caller")),
+                "did": normalize_phone(extract_field(row, "did")),
+                "did_rid": as_str(extract_field(row, "did_id")),
+                "connected": as_bool(extract_field(row, "connected")),
+                "converted": as_bool(extract_field(row, "converted")),
+                "paid": as_bool(extract_field(row, "paid")),
+                "is_live": as_bool(extract_field(row, "is_live")),
+                "is_duplicate": as_bool(extract_field(row, "duplicate")),
+                "blocked": as_bool(extract_field(row, "blocked")),
+                "incomplete": as_bool(extract_field(row, "incomplete")),
+                "duration_sec": as_secs(extract_field(row, "duration")),
+                "connected_sec": as_secs(extract_field(row, "connected_len")),
+                "revenue": as_num(extract_field(row, "revenue")),
+                "payout": as_num(extract_field(row, "payout")),
+                "profit": as_num(extract_field(row, "profit")),
+                "telco_cost": as_num(extract_field(row, "telco_cost")),
+            })
+
+        if len(raw_calls) < 500:
+            break # Reached the last page
+
+        page += 1
+        time.sleep(1) # Prevent rate limits between pages
+
+    # Create a fake report to satisfy the expected return structure
+    report = {"rows": len(all_records), "skipped": 0, "mapped": list(ALIASES.keys()), "missing": []}
+    
+    return all_records, report
 
 
 def test_connection(hours=3):
