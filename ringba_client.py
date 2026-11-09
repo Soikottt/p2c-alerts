@@ -156,10 +156,10 @@ def _z(dt):
 
 def fetch_range(start, end):
     """Download + parse one time window using the JSON endpoint with pagination."""
-    if not config.RINGBA_TOKEN or not config.RINGBA_ACCT:
+    if not config.RINGBA_TOKEN or not config.RINGBA_ACCOUNT_ID:
         raise RingbaError("RINGBA_API_TOKEN or RINGBA_ACCT is missing in your Secrets.")
 
-    url = f"{BASE}/{config.RINGBA_ACCT}/calllogs"
+    url = f"{BASE}/{config.RINGBA_ACCOUNT_ID}/calllogs"
     headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
 
     # Load columns if the file exists, otherwise use a default list
