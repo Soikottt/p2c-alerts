@@ -1,31 +1,43 @@
+"""Reads your secrets from (1) environment / .env file, or (2) Streamlit Cloud secrets."""
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
+
 def get_secret(key, default=None):
-    # 1. Try local environment variable
     val = os.getenv(key)
-    if val:
+    if val not in (None, ""):
         return val
-    # 2. Try Streamlit secrets
     try:
         import streamlit as st
-        if hasattr(st, "secrets") and key in st.secrets:
+        if key in st.secrets:
             return st.secrets[key]
     except Exception:
         pass
     return default
 
-DB_URL = get_secret("DATABASE_URL")
+
+def _fix_db_url(url):
+    """Neon gives 'postgresql://...'; SQLAlchemy wants the driver name in it."""
+    if not url:
+        return url
+    url = str(url).strip().strip('"').strip("'")
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
+
+
+DB_URL = _fix_db_url(get_secret("DATABASE_URL"))
 RINGBA_TOKEN = get_secret("RINGBA_API_TOKEN")
-RINGBA_ACCT = get_secret("RINGBA_ACCOUNT_ID")
+RINGBA_ACCOUNT_ID = get_secret("RINGBA_ACCOUNT_ID")
 SMTP_HOST = get_secret("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(get_secret("SMTP_PORT", 587))
 SMTP_USER = get_secret("SMTP_USER")
-SMTP_PASS = get_secret("SMTP_PASSWORD")
-DRY_RUN = str(get_secret("DRY_RUN", "true")).lower() == "true"
+SMTP_PASSWORD = get_secret("SMTP_PASSWORD")
 
-# Show a clear error if the DB_URL is missing
-if not DB_URL:
-    raise ValueError("❌ DATABASE_URL is missing! Please check your Streamlit Secrets or .env file.")
+# Extra safety switch. The real on/off switch lives inside the app (Settings tab).
+# If DRY_RUN=true here, this machine NEVER sends real email, whatever the app says.
+DRY_RUN_ENV = str(get_secret("DRY_RUN", "false")).strip().lower() == "true"

@@ -1,0 +1,484 @@
+[
+{
+"column": "callDt"
+},
+{
+"column": "tag:InboundNumber:AreaCode"
+},
+{
+"column": "tag:InboundNumber:CountryCode"
+},
+{
+"column": "tag:InboundNumber:CountryDigits"
+},
+{
+"column": "tag:InboundNumber:IsPhoneNumberValid"
+},
+{
+"column": "tag:InboundNumber:NPANXX"
+},
+{
+"column": "tag:InboundNumber:Number"
+},
+{
+"column": "tag:InboundNumber:Number-NoPlus"
+},
+{
+"column": "tag:InboundNumber:NumberE164"
+},
+{
+"column": "tag:InboundNumber:Prefix"
+},
+{
+"column": "tag:InboundNumber:Region"
+},
+{
+"column": "tag:InboundNumber:Suffix"
+},
+{
+"column": "tag:InboundNumber:ShakenStirValidated"
+},
+{
+"column": "tag:InboundNumber:City"
+},
+{
+"column": "tag:Date:Date"
+},
+{
+"column": "tag:Date:Day"
+},
+{
+"column": "tag:Date:ISODate"
+},
+{
+"column": "tag:Date:Month"
+},
+{
+"column": "tag:Date:TimeZone"
+},
+{
+"column": "tag:Date:UTCDate"
+},
+{
+"column": "tag:Date:UTCDay"
+},
+{
+"column": "tag:Date:UTCMonth"
+},
+{
+"column": "tag:Date:UTCWeekDay"
+},
+{
+"column": "tag:Date:UTCYear"
+},
+{
+"column": "tag:Date:WeekDay"
+},
+{
+"column": "tag:Date:Year"
+},
+{
+"column": "tag:Time:Hour"
+},
+{
+"column": "tag:Time:Minute"
+},
+{
+"column": "tag:Time:Second"
+},
+{
+"column": "tag:Time:UTCHour"
+},
+{
+"column": "tag:Time:UTCMinute"
+},
+{
+"column": "tag:Time:UTCOffset"
+},
+{
+"column": "tag:Time:UTCSecond"
+},
+{
+"column": "tag:Publisher:Company"
+},
+{
+"column": "tag:Publisher:Id"
+},
+{
+"column": "tag:Publisher:Name"
+},
+{
+"column": "tag:Publisher:SubId"
+},
+{
+"column": "tag:Campaign:Id"
+},
+{
+"column": "tag:Campaign:Name"
+},
+{
+"column": "tag:Campaign:TrackingId"
+},
+{
+"column": "tag:CallInfo:ProviderId"
+},
+{
+"column": "tag:CallInfo:IsDuplicate"
+},
+{
+"column": "tag:CallInfo:InputFailReason"
+},
+{
+"column": "tag:CallInfo:BlockedReason"
+},
+{
+"column": "tag:CallInfo:BlockedReasonCode"
+},
+{
+"column": "tag:CallInfo:ErrorMessage"
+},
+{
+"column": "tag:Ivr:Id"
+},
+{
+"column": "tag:Ivr:Name"
+},
+{
+"column": "tag:CallLength:Total"
+},
+{
+"column": "tag:CallLength:FromDial"
+},
+{
+"column": "tag:CallLength:FromConnect"
+},
+{
+"column": "tag:DialedNumber:Number"
+},
+{
+"column": "tag:EndCall:EndCallSource"
+},
+{
+"column": "tag:Conversion:ConversionSetting"
+},
+{
+"column": "tag:Conversion:ConversionType"
+},
+{
+"column": "tag:Conversion:ConvertedDuringCall"
+},
+{
+"column": "tag:menu:menuNode_990-c6e9-4a9c-a387-c4d62472ca04"
+},
+{
+"column": "tag:menu:Rehab"
+},
+{
+"column": "tag:menu:Auto Transport"
+},
+{
+"column": "tag:menu:Dumpster and Porta Potty"
+},
+{
+"column": "tag:menu:menuNode_8be-e06d-4543-8767-c813b945099c"
+},
+{
+"column": "tag:User:publisherInboundCallId"
+},
+{
+"column": "tag:Lookup:gatherState"
+},
+{
+"column": "tag:Lookup:gatherZipValid"
+},
+{
+"column": "tag:gather:Zipcode"
+},
+{
+"column": "tag:gather:gatherNode_e26-f1a1-4565-8cda-a0f1d36fdb0d"
+},
+{
+"column": "targetNumber"
+},
+{
+"column": "targetGroupName"
+},
+{
+"column": "campaignId"
+},
+{
+"column": "publisherId"
+},
+{
+"column": "publisherSubId"
+},
+{
+"column": "targetId"
+},
+{
+"column": "targetSubId"
+},
+{
+"column": "buyerId"
+},
+{
+"column": "targetBuyerSubId"
+},
+{
+"column": "targetGroupId"
+},
+{
+"column": "inboundCallId"
+},
+{
+"column": "hasConnected"
+},
+{
+"column": "hasConverted"
+},
+{
+"column": "isLive"
+},
+{
+"column": "numberId"
+},
+{
+"column": "callCompletedDt"
+},
+{
+"column": "callConnectionDt"
+},
+{
+"column": "isIncomplete"
+},
+{
+"column": "hasRecording"
+},
+{
+"column": "wasBlocked"
+},
+{
+"column": "noPayoutReason"
+},
+{
+"column": "noConversionReason"
+},
+{
+"column": "blockReason"
+},
+{
+"column": "incompleteCallReason"
+},
+{
+"column": "offlineConversionUploaded"
+},
+{
+"column": "hasRpcCalculation"
+},
+{
+"column": "googleAdsIntegrationType"
+},
+{
+"column": "googleAdsUploadErrorCode"
+},
+{
+"column": "googleAdsSuccessfulUpload"
+},
+{
+"column": "hasPayout"
+},
+{
+"column": "previouseCallDateTime"
+},
+{
+"column": "previouseCallTargetName"
+},
+{
+"column": "convAdjustmentsApprovedAmount"
+},
+{
+"column": "profitNet"
+},
+{
+"column": "profitGross"
+},
+{
+"column": "hasVoiceMail"
+},
+{
+"column": "totalCost"
+},
+{
+"column": "telcoCost"
+},
+{
+"column": "connectedCallLengthInSeconds"
+},
+{
+"column": "isFromNumberPool"
+},
+{
+"column": "numberPoolId"
+},
+{
+"column": "numberPoolName"
+},
+{
+"column": "wasConversionAdjusted"
+},
+{
+"column": "conversionAdjustedCalls"
+},
+{
+"column": "hasAnnotations"
+},
+{
+"column": "convAdjustmentsRejectedCount"
+},
+{
+"column": "convAdjustmentRequestCount"
+},
+{
+"column": "convAdjustmentsApproved"
+},
+{
+"column": "tcpaCount"
+},
+{
+"column": "wasBlockedByTCPA"
+},
+{
+"column": "tcpaCost"
+},
+{
+"column": "dataEnrichmentCount"
+},
+{
+"column": "icpCost"
+},
+{
+"column": "customDataEnrichmentCount"
+},
+{
+"column": "customDEappendedTagsCount"
+},
+{
+"column": "customDataEnrichmentSuccess"
+},
+{
+"column": "ivrDepth"
+},
+{
+"column": "reroutedToChild"
+},
+{
+"column": "reroutedFromParent"
+},
+{
+"column": "globalCallId"
+},
+{
+"column": "rerouteDepth"
+},
+{
+"column": "pingDynamicCallLengthInSeconds"
+},
+{
+"column": "ringTreeWinningBidTargetName"
+},
+{
+"column": "ringTreeWinningBidTargetId"
+},
+{
+"column": "ringTreeWinningBid"
+},
+{
+"column": "ringTreeWinningBidMinimumRevenueAmount"
+},
+{
+"column": "ringTreeWinningBidDynamicDuration"
+},
+{
+"column": "ringTreeWinningBidMaxDynamicDuration"
+},
+{
+"column": "pingTotalBidAmount"
+},
+{
+"column": "pingSuccessCount"
+},
+{
+"column": "pingFailCount"
+},
+{
+"column": "bidAmount"
+},
+{
+"column": "winningBid"
+},
+{
+"column": "winningBidCallAccepted"
+},
+{
+"column": "winningBidCallRejected"
+},
+{
+"column": "avgPingTreeBidAmount"
+},
+{
+"column": "tag:InboundNumber:ShakenStirAttestation"
+},
+{
+"column": "wasPayoutAdjusted"
+},
+{
+"column": "hasPreviouslyConnected"
+},
+{
+"column": "tag:InboundNumber:State"
+},
+{
+"column": "buyer"
+},
+{
+"column": "publisherName"
+},
+{
+"column": "campaignName"
+},
+{
+"column": "inboundPhoneNumber"
+},
+{
+"column": "number"
+},
+{
+"column": "timeToCallInSeconds"
+},
+{
+"column": "isDuplicate"
+},
+{
+"column": "endCallSource"
+},
+{
+"column": "timeToConnectInSeconds"
+},
+{
+"column": "targetName"
+},
+{
+"column": "conversionAmount"
+},
+{
+"column": "payoutAmount"
+},
+{
+"column": "callLengthInSeconds",
+"displayName": "Duration"
+},
+{
+"column": "recordingUrl",
+"displayName": "Recording"
+}
+]

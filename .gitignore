@@ -1,5 +1,5 @@
 .env
+.streamlit/secrets.toml
 __pycache__/
 *.pyc
-.venv/
-.Streamlit/
+*.db
