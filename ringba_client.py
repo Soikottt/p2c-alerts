@@ -157,12 +157,11 @@ def _z(dt):
 def fetch_range(start, end):
     """Download + parse one time window using the JSON endpoint with pagination."""
     if not config.RINGBA_TOKEN or not config.RINGBA_ACCOUNT_ID:
-        raise RingbaError("RINGBA_API_TOKEN or RINGBA_ACCT is missing in your Secrets.")
+        raise RingbaError("RINGBA_API_TOKEN or RINGBA_ACCOUNT_ID is missing in your Secrets.")
 
     url = f"{BASE}/{config.RINGBA_ACCOUNT_ID}/calllogs"
     headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
 
-    # Load columns if the file exists, otherwise use a default list
     try:
         with open(COLUMNS_FILE, encoding="utf-8") as f:
             columns = json.load(f)
@@ -174,6 +173,7 @@ def fetch_range(start, end):
         ]]
 
     all_records = []
+    seen_ids = set() # Safety: prevents infinite loops
     page = 1
 
     while True:
@@ -183,7 +183,7 @@ def fetch_range(start, end):
             "valueColumns": columns,
             "orderByColumns": [{"column": "callDt", "direction": "asc"}],
             "formatTimeZone": "America/New_York",
-            "pagination": {"page": page, "pageSize": 500}
+            "pagination": {"page": page, "pageSize": 100}
         }
 
         # Retry logic for Rate Limits (429)
@@ -208,20 +208,24 @@ def fetch_range(start, end):
             raise RingbaError(f"Ringba API Error {response.status_code}: {response.text[:300]}")
 
         data = response.json()
-        
-        # Handle both response structures
         raw_calls = data.get("callLog", {}).get("data", data.get("report", {}).get("records", []))
             
         if not raw_calls:
             break
 
+        new_records_this_page = 0
         for row in raw_calls:
             cid = as_str(extract_field(row, "call_id"))
-            when = parse_when(as_str(extract_field(row, "call_iso")), extract_field(row, "call_date"))
+            if not cid or cid in seen_ids:
+                continue
             
-            if not cid or not when:
+            when = parse_when(as_str(extract_field(row, "call_iso")), extract_field(row, "call_date"))
+            if not when:
                 continue
 
+            seen_ids.add(cid)
+            new_records_this_page += 1
+            
             all_records.append({
                 "call_id": cid,
                 "call_at": when,
@@ -249,15 +253,14 @@ def fetch_range(start, end):
                 "telco_cost": as_num(extract_field(row, "telco_cost")),
             })
 
-        if len(raw_calls) < 500:
-            break # Reached the last page
-
+        # If the API returns the exact same calls (ignoring pagination), stop to prevent infinite loop
+        if new_records_this_page == 0:
+            break
+            
         page += 1
         time.sleep(1) # Prevent rate limits between pages
 
-    # Create a fake report to satisfy the expected return structure
     report = {"rows": len(all_records), "skipped": 0, "mapped": list(ALIASES.keys()), "missing": []}
-    
     return all_records, report
 
 
