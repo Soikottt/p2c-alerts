@@ -1,0 +1,31 @@
+name: Alert engine (every 5 minutes)
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: alert-engine
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-engine.txt
+      - run: pip install -r requirements-engine.txt
+      - name: Run the engine
+        run: python engine.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RINGBA_API_TOKEN: ${{ secrets.RINGBA_API_TOKEN }}
+          RINGBA_ACCOUNT_ID: ${{ secrets.RINGBA_ACCOUNT_ID }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
