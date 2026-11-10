@@ -22,13 +22,49 @@ RULE_SEEDS = [
      "Publisher reached a % of its cap. Percentages are set per cap on the Caps tab."),
     ("buyer_cap", "Buyer cap warning", True, None, None, False, True, True,
      "Buyer reached a % of its cap. Percentages are set per cap on the Caps tab."),
-    ("did_inactive", "Inactive DID", True, 30, None, False, False, False,
+    ("did_inactive", "Inactive DID", True, 30, None, True, False, True,
      "A DID had no calls for N days (counted from its last call, or from the day it was added). N = 'Days'."),
     ("engine_stale", "Alert engine was offline", True, None, 45, False, False, False,
      "The 5-minute engine did not run for N minutes. N = 'Count' (minutes)."),
     ("sync_error", "Ringba sync failed", True, None, None, False, False, False,
      "The engine could not read call data from Ringba."),
+    ("alert_response", "Someone answered an alert email", True, None, None, False, False, False,
+     "Sent to you when someone clicks an answer button in an alert email."),
 ]
+
+# Answer buttons offered inside each alert email: (alert_type, label, effect, days)
+ACTION_SEEDS = [
+    ("did_inactive", "Remove this DID", "record", None),
+    ("did_inactive", "Keep it - wait 7 more days", "snooze", 7),
+    ("did_inactive", "I will contact the publisher first", "snooze", 3),
+    ("lapsed_publisher", "Publisher is restarting - all good", "record", None),
+    ("lapsed_publisher", "Please investigate this publisher", "record", None),
+    ("new_publisher", "Approved - looks fine", "record", None),
+    ("new_publisher", "Suspicious - please investigate", "record", None),
+    ("publisher_cap", "I will contact the publisher", "snooze", 1),
+    ("publisher_cap", "Pause this publisher", "record", None),
+    ("buyer_cap", "I will contact the buyer", "snooze", 1),
+    ("buyer_cap", "Cap will be increased in Ringba", "record", None),
+]
+
+# Columns added after the first release (adding twice is harmless: the error is ignored)
+ADD_COLUMNS = [
+    ("alert_rules", "template_id", "INTEGER"),
+    ("alerts", "body_html", "TEXT"),
+    ("alerts", "snooze_key", "TEXT"),
+    ("alerts", "response_label", "TEXT"),
+    ("alerts", "responded_at", "TIMESTAMPTZ"),
+    ("alerts", "responded_by", "TEXT"),
+    ("alerts", "response_note", "TEXT"),
+    ("dids", "publisher_id", "INTEGER"),
+    ("dids", "affiliate_name", "TEXT"),
+    ("dids", "next_charge_at", "TIMESTAMPTZ"),
+]
+
+# The first wording of the inactive-DID email. Saved templates that still have EXACTLY this text are upgraded.
+OLD_DID_BODY = ("DID {did}{label_part} has had no calls for {idle_days} days.\nCreated / added: {added}\n"
+                "Last call: {last_call}\nMonthly cost: {monthly_cost}\n\n"
+                "Decision needed: release this DID to avoid the monthly charge, or keep it for now?")
 
 OLD_TABLES = ["calls", "dids", "cap_rules", "cc_routing", "alerts_log", "publishers", "buyers"]
 
@@ -102,6 +138,42 @@ def _copy_old_data(log):
         log("  copied your admin email")
 
 
+def _add_columns():
+    for table, col, typ in ADD_COLUMNS:
+        try:
+            db.x(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        except Exception:
+            pass   # column already exists
+
+
+def _seed_templates_and_actions():
+    import templates
+    now = db.now_utc()
+    for atype, (subj, body) in templates.DEFAULTS.items():
+        if not db.q1("SELECT 1 AS x FROM email_templates WHERE alert_type=:t", t=atype):
+            db.x("INSERT INTO email_templates (alert_type, name, subject, body, created_at, updated_at) "
+                 "VALUES (:t,'Default',:s,:b,:n,:n)", t=atype, s=subj, b=body, n=now)
+        db.x("UPDATE alert_rules SET template_id=(SELECT MIN(id) FROM email_templates WHERE alert_type=:t) "
+             "WHERE alert_type=:t AND template_id IS NULL", t=atype)
+    seeded = {r["alert_type"] for r in db.q("SELECT DISTINCT alert_type FROM alert_action_defs")}
+    old = db.q1("SELECT id, body FROM email_templates WHERE alert_type='did_inactive' AND name='Default'")
+    if old and old["body"] == OLD_DID_BODY:
+        subj, body = templates.DEFAULTS["did_inactive"]
+        db.x("UPDATE email_templates SET subject=:s, body=:b, updated_at=:n WHERE id=:i", s=subj, b=body, n=now, i=old["id"])
+    for i, (atype, label, effect, days) in enumerate(ACTION_SEEDS):
+        if atype in seeded:
+            continue
+        db.x("INSERT INTO alert_action_defs (alert_type, label, effect, effect_days, active, sort_order) "
+             "VALUES (:t,:l,:e,:d,TRUE,:o)", t=atype, l=label, e=effect, d=days, o=i)
+
+
+def _migrate_managers():
+    """Older layout had ONE manager per publisher (publishers.manager_id). Now it is many: publisher_managers."""
+    db.x("INSERT INTO publisher_managers (publisher_id, manager_id) SELECT id, manager_id FROM publishers "
+         "WHERE manager_id IS NOT NULL ON CONFLICT DO NOTHING")
+    db.x("UPDATE publishers SET manager_id = NULL WHERE manager_id IS NOT NULL")
+
+
 def seed(log=print):
     for k, v in SETTING_DEFAULTS.items():
         db.x("INSERT INTO settings (key, value) VALUES (:k, :v) ON CONFLICT (key) DO NOTHING", k=k, v=v)
@@ -110,6 +182,7 @@ def seed(log=print):
                    cc_manager, cc_entity_email, cc_entity_extra, extra_cc, description)
                 VALUES (:t,:l,:e,:d,:c,:m,:ce,:cx,'',:desc) ON CONFLICT (alert_type) DO NOTHING""",
              t=t, l=label, e=en, d=days, c=cnt, m=ccm, ce=cce, cx=ccx, desc=desc)
+    _seed_templates_and_actions()
 
 
 def run(log=print, schema_file=None, migrate=True):
@@ -126,6 +199,8 @@ def run(log=print, schema_file=None, migrate=True):
     sql = open(schema_file or os.path.join(HERE, "schema.sql"), encoding="utf-8").read()
     for stmt in _split_sql(sql):
         db.x(stmt)
+    _add_columns()
+    _migrate_managers()
     log("  tables are ready")
     if migrated:
         log("Copying your useful old settings into the new tables ...")

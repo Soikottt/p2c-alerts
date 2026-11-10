@@ -48,7 +48,10 @@ CREATE TABLE IF NOT EXISTS dids (
   monthly_cost NUMERIC(10,2),
   notes TEXT,
   added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_call_at TIMESTAMPTZ
+  last_call_at TIMESTAMPTZ,
+  publisher_id INTEGER,
+  affiliate_name TEXT,
+  next_charge_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS calls (
@@ -105,7 +108,8 @@ CREATE TABLE IF NOT EXISTS alert_rules (
   cc_entity_email BOOLEAN NOT NULL DEFAULT FALSE,
   cc_entity_extra BOOLEAN NOT NULL DEFAULT TRUE,
   extra_cc TEXT,
-  description TEXT
+  description TEXT,
+  template_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -120,7 +124,13 @@ CREATE TABLE IF NOT EXISTS alerts (
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  sent_at TIMESTAMPTZ
+  sent_at TIMESTAMPTZ,
+  body_html TEXT,
+  snooze_key TEXT,
+  response_label TEXT,
+  responded_at TIMESTAMPTZ,
+  responded_by TEXT,
+  response_note TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_alerts_status ON alerts (status);
 CREATE INDEX IF NOT EXISTS ix_alerts_created ON alerts (created_at);
@@ -139,3 +149,45 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   error TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_sync_runs_started ON sync_runs (started_at);
+
+CREATE TABLE IF NOT EXISTS publisher_managers (
+  publisher_id INTEGER NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
+  manager_id INTEGER NOT NULL REFERENCES affiliate_managers(id) ON DELETE CASCADE,
+  PRIMARY KEY (publisher_id, manager_id)
+);
+
+CREATE TABLE IF NOT EXISTS email_templates (
+  id SERIAL PRIMARY KEY,
+  alert_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS alert_action_defs (
+  id SERIAL PRIMARY KEY,
+  alert_type TEXT NOT NULL,
+  label TEXT NOT NULL,
+  effect TEXT NOT NULL DEFAULT 'record',
+  effect_days INTEGER,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS alert_actions (
+  token TEXT PRIMARY KEY,
+  alert_id INTEGER NOT NULL,
+  label TEXT NOT NULL,
+  effect TEXT NOT NULL DEFAULT 'record',
+  effect_days INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_alert_actions_alert ON alert_actions (alert_id);
+
+CREATE TABLE IF NOT EXISTS snoozes (
+  entity_key TEXT PRIMARY KEY,
+  snooze_until TIMESTAMPTZ NOT NULL,
+  reason TEXT
+);

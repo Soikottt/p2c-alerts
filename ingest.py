@@ -11,6 +11,17 @@ CALL_COLS = ["call_id", "call_at", "publisher_id", "buyer_id", "did_id", "campai
              "incomplete", "duration_sec", "connected_sec", "revenue", "payout", "profit", "telco_cost",
              "source", "created_at", "updated_at"]
 UPDATE_COLS = [c for c in CALL_COLS if c not in ("call_id", "source", "created_at")]
+CHUNK_PAUSE = 1.0   # seconds between day-chunks during a big backfill (avoids Ringba HTTP 429)
+
+
+def _check(records, report):
+    """Refuse to save data we cannot trust (for example no DID column in Ringba's answer)."""
+    if report["missing"]:
+        raise rc.RingbaError("Ringba's answer is missing: " + ", ".join(report["missing"])
+                             + ". Keys it returned: " + ", ".join(report.get("first_row_keys", [])[:25]))
+    if records and not any(r["did"] for r in records):
+        raise rc.RingbaError("Ringba returned calls but no dialed number (DID). Press 'Test Ringba connection' "
+                             "in Settings and send me the key list.")
 
 
 def _resolve_entity(table, rid_col, records, rid_key, name_key, now):
@@ -136,8 +147,7 @@ def live_sync(hours=None):
     run_id = _start_run("live", start, end)
     try:
         records, report = rc.fetch_range(start, end)
-        if report["missing"]:
-            raise rc.RingbaError("Ringba file is missing columns: " + ", ".join(report["missing"]))
+        _check(records, report)
         stats = upsert_calls(records, source="live")
         _finish_run(run_id, "ok", stats)
         return stats
@@ -160,8 +170,7 @@ def backfill_range(start, end, progress=None, source="backfill", step_hours=24):
     for i, (a, b) in enumerate(chunks, 1):
         try:
             records, report = rc.fetch_range(a, b)
-            if report["missing"]:
-                raise rc.RingbaError("missing columns: " + ", ".join(report["missing"]))
+            _check(records, report)
             s = upsert_calls(records, source=source)
             for k in total:
                 total[k] += s[k]
@@ -170,7 +179,7 @@ def backfill_range(start, end, progress=None, source="backfill", step_hours=24):
             traceback.print_exc()
         if progress:
             progress(i, len(chunks), f"{b:%Y-%m-%d}", total)
-        time.sleep(0.5)
+        time.sleep(CHUNK_PAUSE)
     status = "ok" if not failures else ("partial" if total["fetched"] else "error")
     _finish_run(run_id, status, total, error="; ".join(failures)[:1500] if failures else None)
     total["failures"] = failures

@@ -1,6 +1,7 @@
 """Sends the queued alerts. An alert counts as SENT only after Gmail accepts it."""
 import smtplib
 from email.message import EmailMessage
+from email.utils import formataddr
 
 import alerts
 import config
@@ -15,20 +16,39 @@ def is_dry_run():
     return str(db.get_setting("dry_run", "true")).strip().lower() == "true"
 
 
-def smtp_send(to_list, cc_list, subject, body):
+def sender():
+    """(display name, from address). From address defaults to your SMTP login."""
+    name = (db.get_setting("from_name", "") or "").strip()
+    addr = (db.get_setting("from_email", "") or "").strip() or config.SMTP_USER
+    return name, addr
+
+
+def smtp_send(to_list, cc_list, subject, body, html=None):
     if not config.SMTP_USER or not config.SMTP_PASSWORD:
         raise RuntimeError("SMTP_USER / SMTP_PASSWORD are missing in your Secrets.")
+    name, addr = sender()
     msg = EmailMessage()
-    msg["From"] = config.SMTP_USER
+    msg["From"] = formataddr((name, addr)) if name else addr
     msg["To"] = ", ".join(to_list)
     if cc_list:
         msg["Cc"] = ", ".join(cc_list)
+    reply_to = alerts.parse_emails(db.get_setting("reply_to", ""))
+    if reply_to:
+        msg["Reply-To"] = ", ".join(reply_to)
     msg["Subject"] = subject
     msg.set_content(body)
-    with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as s:
-        s.starttls()
-        s.login(config.SMTP_USER, config.SMTP_PASSWORD)
-        s.send_message(msg, to_addrs=list(to_list) + list(cc_list))
+    if html:
+        msg.add_alternative(html, subtype="html")
+    recipients = list(to_list) + list(cc_list)
+    if int(config.SMTP_PORT) == 465:
+        with smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as s:
+            s.login(config.SMTP_USER, config.SMTP_PASSWORD)
+            s.send_message(msg, from_addr=addr, to_addrs=recipients)
+    else:
+        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as s:
+            s.starttls()
+            s.login(config.SMTP_USER, config.SMTP_PASSWORD)
+            s.send_message(msg, from_addr=addr, to_addrs=recipients)
 
 
 def send_test(to_list, subject="Test email from your Pay-Per-Call alert tool"):
@@ -56,7 +76,7 @@ def process_outbox(limit=100):
             res["dry_run"] += 1
             continue
         try:
-            smtp_send(to, cc, a["subject"], a["body"])
+            smtp_send(to, cc, a["subject"], a["body"], a.get("body_html"))
             db.x("UPDATE alerts SET status='sent', sent_at=:n, attempts=attempts+1, last_error=NULL WHERE id=:i",
                  n=db.now_utc(), i=a["id"])
             res["sent"] += 1

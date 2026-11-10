@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import alerts
 import db
+import dids
 import ingest
 import mailer
 import rules
@@ -20,11 +21,7 @@ def check_stale(now):
     last = db.to_dt(last["t"]) if last and last["t"] else None
     if last and now - last > timedelta(minutes=minutes):
         gap = int((now - last).total_seconds() // 60)
-        alerts.create_alert("engine_stale", f"stale:{last.isoformat()}",
-                            f"Alert engine was offline for {gap} minutes",
-                            f"The last successful Ringba sync was at {fmt(last)} ({gap} minutes ago).\n"
-                            f"Calls in that gap are caught up now, but alerts were late. "
-                            f"Check GitHub Actions if this repeats.\n")
+        alerts.create_alert("engine_stale", f"stale:{last.isoformat()}", {"gap_minutes": gap, "last_sync": fmt(last)})
 
 
 def run_once(log=print):
@@ -44,8 +41,18 @@ def run_once(log=print):
         lines.append(f"Ringba sync FAILED: {e}")
         traceback.print_exc()
         try:
-            alerts.create_alert("sync_error", f"sync_error:{now:%Y%m%d%H}", "Ringba sync failed",
-                                f"The engine could not read calls from Ringba.\n\nError: {e}\n")
+            alerts.create_alert("sync_error", f"sync_error:{now:%Y%m%d%H}", {"error": str(e)[:600]})
+        except Exception:
+            pass
+    try:                                   # DID list: refreshed from Ringba about once an hour (non-critical)
+        r = dids.sync_if_due(now)
+        if r is not None:
+            lines.append(f"DID sync: {r['in_ringba']} numbers in Ringba, {r['added']} new, {r['updated']} updated, "
+                         f"{r['retired']} retired" + (f", {r['retire_skipped']} NOT retired (list looked incomplete)" if r["retire_skipped"] else ""))
+    except Exception as e:
+        lines.append(f"DID sync FAILED (will retry in 30 min): {e}")
+        try:
+            alerts.create_alert("sync_error", f"numsync_error:{now:%Y%m%d}", {"error": f"DID list sync failed: {str(e)[:500]}"})
         except Exception:
             pass
     try:

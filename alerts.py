@@ -2,7 +2,6 @@
 import re
 
 import db
-from timeutil import fmt  # noqa: F401  (re-exported for rules)
 
 EMAIL_RE = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
 
@@ -31,16 +30,20 @@ def admin_to():
     return parse_emails(db.get_setting("admin_emails", ""))
 
 
+def is_snoozed(key):
+    r = db.q1("SELECT snooze_until FROM snoozes WHERE entity_key=:k", k=key)
+    return bool(r and db.to_dt(r["snooze_until"]) > db.now_utc())
+
+
 def _entity_cc(rule, entity_type, entity_id):
     cc = []
     if entity_type == "publisher":
-        r = db.q1("""SELECT p.publisher_email, p.cc_publisher, p.extra_cc,
-                            m.email AS manager_email, m.active AS manager_active
-                     FROM publishers p LEFT JOIN affiliate_managers m ON m.id = p.manager_id
-                     WHERE p.id=:i""", i=entity_id)
+        if rule["cc_manager"]:
+            for m in db.q("""SELECT m.email FROM publisher_managers pm JOIN affiliate_managers m ON m.id = pm.manager_id
+                             WHERE pm.publisher_id=:i AND m.active = TRUE ORDER BY m.name""", i=entity_id):
+                cc += parse_emails(m["email"])
+        r = db.q1("SELECT publisher_email, cc_publisher, extra_cc FROM publishers WHERE id=:i", i=entity_id)
         if r:
-            if rule["cc_manager"] and r["manager_email"] and r["manager_active"]:
-                cc += parse_emails(r["manager_email"])
             if rule["cc_entity_email"] and r["cc_publisher"] and r["publisher_email"]:
                 cc += parse_emails(r["publisher_email"])
             if rule["cc_entity_extra"]:
@@ -71,15 +74,31 @@ def build_recipients(rule, publisher_id=None, buyer_id=None):
     return to, final
 
 
-def create_alert(alert_type, dedupe_key, subject, body, publisher_id=None, buyer_id=None, status="pending"):
-    """Queue one email. Returns True if it was new (same dedupe_key is never queued twice)."""
+def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=None, status="pending",
+                 snooze_key=None, subject=None, body=None):
+    """Queue one email. Returns True if it was new (the same dedupe_key is never queued twice).
+    The wording comes from the alert's template; ctx fills the {placeholders}."""
+    import actions
+    import templates
     rule = get_rule(alert_type)
     if not rule or not rule["enabled"]:
         return False
+    if snooze_key and is_snoozed(snooze_key):
+        return False
+    if subject is None:
+        subj_t, body_t = templates.get_template(alert_type, rule)
+        subject, body = templates.render(subj_t, ctx), templates.render(body_t, ctx)
     to, cc = build_recipients(rule, publisher_id, buyer_id)
     prefix = db.get_setting("subject_prefix", "[P2C Alert]")
-    n = db.x("""INSERT INTO alerts (alert_type, dedupe_key, subject, body, to_emails, cc_emails, status, attempts, created_at)
-                VALUES (:t,:k,:s,:b,:to,:cc,:st,0,:now) ON CONFLICT (dedupe_key) DO NOTHING""",
-             t=alert_type, k=dedupe_key, s=f"{prefix} {subject}".strip(), b=body,
-             to=", ".join(to), cc=", ".join(cc), st=status, now=db.now_utc())
-    return n == 1
+    rows = db.q("""INSERT INTO alerts (alert_type, dedupe_key, subject, body, to_emails, cc_emails, status, attempts,
+                                       created_at, snooze_key)
+                   VALUES (:t,:k,:s,:b,:to,:cc,:st,0,:now,:sk) ON CONFLICT (dedupe_key) DO NOTHING RETURNING id""",
+                t=alert_type, k=dedupe_key, s=f"{prefix} {subject}".strip(), b=body, to=", ".join(to),
+                cc=", ".join(cc), st=status, now=db.now_utc(), sk=snooze_key)
+    if not rows:
+        return False
+    if status == "pending":
+        text, html = actions.attach(rows[0]["id"], alert_type, body)
+        if html:
+            db.x("UPDATE alerts SET body=:b, body_html=:h WHERE id=:i", b=text, h=html, i=rows[0]["id"])
+    return True

@@ -1,4 +1,5 @@
 """Small database helper. Every other file talks to Postgres only through this one."""
+import time
 from datetime import datetime, timezone
 
 from dateutil.parser import isoparse
@@ -15,6 +16,15 @@ SETTING_DEFAULTS = {
     "subject_prefix": "[P2C Alert]",
     "dry_run": "true",             # true = print emails instead of sending
     "admin_emails": "",
+    "from_name": "",               # shown as the sender name, e.g. "Acme Call Alerts"
+    "from_email": "",              # empty = use the SMTP login address
+    "reply_to": "",                # where replies go (e.g. your team inbox)
+    "app_url": "",                 # your Streamlit app link, used for the answer buttons in emails
+    "numbers_sync_minutes": "60",  # how often the DID list is refreshed from Ringba
+    "numbers_auto_retire": "true", # DIDs that vanish from Ringba's list are marked retired
+    "numbers_next_run": "",        # (internal) when the next DID sync is due
+    "numbers_last_ok": "",         # (internal) last successful DID sync
+    "numbers_last_error": "",      # (internal) last DID sync problem
 }
 
 
@@ -30,6 +40,7 @@ def get_engine():
 def set_engine(engine):  # used by tests
     global _engine
     _engine = engine
+    clear_settings_cache()
 
 
 def q(sql, **params):
@@ -97,13 +108,31 @@ def to_dt(v):
     return v.astimezone(timezone.utc)
 
 
+_settings_cache = {"t": 0.0, "data": {}}
+SETTINGS_TTL = 15.0   # seconds. Settings are read all the time; this keeps pages fast.
+
+
+def _all_settings():
+    now = time.monotonic()
+    if now - _settings_cache["t"] > SETTINGS_TTL or not _settings_cache["data"]:
+        _settings_cache["data"] = {r["key"]: r["value"] for r in q("SELECT key, value FROM settings")}
+        _settings_cache["t"] = now
+    return _settings_cache["data"]
+
+
+def clear_settings_cache():
+    _settings_cache["t"] = 0.0
+    _settings_cache["data"] = {}
+
+
 def get_setting(key, default=None):
-    r = q1("SELECT value FROM settings WHERE key=:k", k=key)
-    if r is not None and r["value"] is not None:
-        return r["value"]
+    v = _all_settings().get(key)
+    if v is not None:
+        return v
     return default if default is not None else SETTING_DEFAULTS.get(key)
 
 
 def set_setting(key, value):
     x("INSERT INTO settings (key, value) VALUES (:k, :v) "
       "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", k=key, v=str(value))
+    clear_settings_cache()
