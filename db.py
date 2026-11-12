@@ -47,10 +47,23 @@ def get_engine():
     return _engine
 
 
-def set_engine(engine):  # used by tests
+def get_engine():
     global _engine
-    _engine = engine
-    clear_settings_cache()
+    if _engine is None:
+        if not config.DB_URL:
+            raise RuntimeError("DATABASE_URL is missing. Add it to your Secrets (or .env file).")
+        kwargs = {
+            "pool_pre_ping": False,  # Turned off: this was hanging on Neon
+            "pool_recycle": 300,
+            "pool_timeout": 10
+        }
+        if str(config.DB_URL).startswith("postgresql"):
+            kwargs["connect_args"] = {
+                "connect_timeout": 10,
+                "options": "-c statement_timeout=10000" # No SQL query can run for more than 10 seconds
+            }
+        _engine = create_engine(config.DB_URL, **kwargs)
+    return _engine
 
 
 def q(sql, **params):
