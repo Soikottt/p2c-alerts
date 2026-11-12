@@ -17,6 +17,8 @@ if not config.DB_URL:
 
 import actions
 import alerts
+import backup
+import cases
 import db
 import dids as didtools
 import engine
@@ -274,6 +276,8 @@ def page_dashboard():
         st.error(f"Last sync error: {last['error']}")
     if db.get_setting("numbers_last_error", ""):
         st.warning(f"DID list sync problem: {db.get_setting('numbers_last_error')}")
+    if db.get_setting("inbox_last_error", ""):
+        st.warning(f"Could not read email replies: {db.get_setting('inbox_last_error')}")
 
     st.subheader("Calls")
     a, b = reports.preset_range("Last 7 days")
@@ -364,6 +368,64 @@ def page_reports():
     for col, k, fp in zip(st.columns(5), ["Connect %", "Revenue", "Payout", "Profit", "Avg talk (sec)"],
                           ["{:.1f}%", "${:,.2f}", "${:,.2f}", "${:,.2f}", "{}"]):
         col.metric(k, fp.format(sm[k]))
+    with st.expander("🔍 Compare with a Ringba report (check that the numbers match)"):
+        st.caption(f"Download **Report by publisher** from Ringba for the SAME dates as above ({a} → {b}) and upload it here. "
+                   "Ringba must be set to your account timezone. A difference of 0 means this tool matches Ringba.")
+        with st.form("recon_form"):
+            up = st.file_uploader("Ringba report CSV", type=["csv"], key="recon_file")
+            go_r = st.form_submit_button("Compare")
+        if go_r and up is not None:
+            try:
+                sdf, totals = reports.parse_ringba_summary(up.getvalue().decode("utf-8-sig", errors="replace"))
+                st.session_state["recon"] = (reports.reconcile(sdf, cached_calls(s, e, None, None)), totals, f"{a} → {b}")
+            except Exception as ex:
+                st.session_state["recon"] = None
+                st.error(f"Could not read that file: {ex}")
+        rec = st.session_state.get("recon")
+        if rec:
+            res, totals, rng = rec
+            tool_total = int(res["Tool Calls"].sum()) if "Tool Calls" in res else 0
+            ring_total = totals.get("calls", int(res["Ringba Calls"].sum()))
+            (st.success if tool_total == ring_total else st.warning)(
+                f"Range compared: {rng}. Ringba says **{ring_total:,}** calls, this tool has **{tool_total:,}** "
+                f"(difference {tool_total - ring_total:+,}).")
+            bad_rows = res[res["Result"] != "✅ match"]
+            st.caption(f"{len(res) - len(bad_rows)} publishers match, {len(bad_rows)} differ. If the tool is LOWER, load the missing days "
+                       "(next box). If the day totals look shifted, check the timezone in Settings.")
+            st.dataframe(res, hide_index=True)
+            st.download_button("⬇️ Download comparison", res.to_csv(index=False), "comparison.csv", "text/csv", key="dl_recon")
+    with st.expander("🩺 Check for missing or incomplete days"):
+        st.caption("Looks for days with no calls, 25 calls or fewer, or far below a normal day (for example days loaded before the "
+                   "20-calls-per-request fix). You can then reload exactly those days from Ringba.")
+        if st.button("Check my stored history", key="chk_days"):
+            f_, l_, n_ = reports.coverage()
+            if n_ == 0:
+                st.session_state["bad_days"] = []
+            else:
+                counts = reports.day_counts(f_.astimezone(tz()).date(), reports.today_local())
+                st.session_state["bad_days"] = reports.suspicious_days(counts)
+                st.session_state["day_counts"] = counts
+        bad = st.session_state.get("bad_days")
+        if bad is not None:
+            if not bad:
+                st.success("Every stored day looks complete.")
+            else:
+                cnt = st.session_state.get("day_counts", {})
+                st.warning(f"{len(bad)} day(s) look incomplete.")
+                st.dataframe(pd.DataFrame({"day": [str(d) for d in bad], "calls stored": [cnt.get(d, 0) for d in bad]}), hide_index=True)
+                if st.button(f"⬇️ Reload these {len(bad)} days from Ringba", key="reload_days"):
+                    bar = st.progress(0.0, text="Reloading")
+                    tot = {"inserted": 0, "updated": 0}
+                    fails = []
+                    for i, d_ in enumerate(bad, 1):
+                        ds, de = reports.utc_bounds(d_, d_)
+                        r_ = ingest.backfill_range(ds, de)
+                        tot["inserted"] += r_["inserted"]; tot["updated"] += r_["updated"]; fails += r_["failures"]
+                        bar.progress(i / len(bad), text=f"Reloaded {d_} ({i}/{len(bad)})")
+                    st.cache_data.clear()
+                    st.session_state["bad_days"] = None
+                    (st.error if fails else st.success)(f"Added {tot['inserted']} missing calls, refreshed {tot['updated']}." +
+                                                         (" Some days failed: " + "; ".join(fails[:3]) if fails else ""))
     if df.empty:
         st.info("No calls in this range.")
         return
@@ -523,25 +585,32 @@ def page_dids():
             st.rerun()
     c2.caption((f"Last successful sync: {ago(ok_t)}. " if ok_t else "Not synced yet. ") + (f"Last problem: {err}" if err else ""))
     now = db.now_utc()
-    since = now - timedelta(days=30)
     pubn = {p["id"]: p["name"] for p in db.q("SELECT id, name FROM publishers")}
     rows = db.q("""SELECT d.id, d.number, d.label, d.status, d.monthly_cost, d.notes, d.added_at, d.last_call_at,
-                          d.publisher_id, d.affiliate_name, d.next_charge_at,
-                          (SELECT COUNT(*) FROM calls WHERE did_id = d.id AND call_at >= :s) AS calls_30d
-                   FROM dids d""", s=since)
+                          d.publisher_id, d.affiliate_name, d.next_charge_at, d.campaign_id
+                   FROM dids d""")
+    camp = didtools.campaign_names(rows)
+    calls30 = didtools.calls_last_30d(now)
+    am_notes = cases.latest_by_did()
+    case_state = cases.status_by_did()
     recs = []
     for r in rows:
         ref = db.to_dt(r["last_call_at"]) or db.to_dt(r["added_at"])
-        recs.append({"id": r["id"], "number": r["number"], "label": r["label"], "status": r["status"],
-                     "monthly_cost": float(r["monthly_cost"]) if r["monthly_cost"] is not None else None, "notes": r["notes"],
+        recs.append({"id": r["id"], "campaign": camp.get(r["id"], ""),
                      "publisher": pubn.get(r["publisher_id"]) or r["affiliate_name"] or "",
-                     "next_charge": fmt(r["next_charge_at"], False)[:10] if r["next_charge_at"] else "",
                      "created_added": fmt(r["added_at"]) if r["added_at"] else "-",
+                     "next_charge": fmt(r["next_charge_at"], False)[:10] if r["next_charge_at"] else "",
+                     "number": r["number"],
                      "last_call": fmt(r["last_call_at"]) if r["last_call_at"] else "never",
-                     "idle_days": (now - ref).days if ref else None, "calls_30d": r["calls_30d"],
+                     "calls_30d": calls30.get(r["id"], 0),
+                     "follow_up": cases.one_line(am_notes.get(r["id"]), fmt),
+                     "case": cases.label(case_state[r["id"]]) if r["id"] in case_state else "",
+                     "status": r["status"], "label": r["label"],
+                     "monthly_cost": float(r["monthly_cost"]) if r["monthly_cost"] is not None else None, "notes": r["notes"],
+                     "idle_days": (now - ref).days if ref else None,
                      "_retired": 1 if r["status"] == "retired" else 0})
-    cols = ["id", "number", "label", "status", "monthly_cost", "notes", "publisher", "next_charge", "created_added", "last_call",
-            "idle_days", "calls_30d"]
+    cols = ["id", "campaign", "publisher", "created_added", "next_charge", "number", "last_call", "calls_30d", "follow_up",
+            "case", "status", "label", "monthly_cost", "notes", "idle_days"]
     df = frame(recs, cols + ["_retired"])
     df = df.sort_values(["_retired", "idle_days"], ascending=[True, False], na_position="last").drop(columns="_retired").reset_index(drop=True)
 
@@ -553,19 +622,61 @@ def page_dids():
                 "monthly_cost": v["monthly_cost"], "notes": v["notes"]}
 
     cfg = {"id": None,
-           "number": st.column_config.TextColumn("DID number", required=True),
-           "label": st.column_config.TextColumn("Label"),
-           "status": st.column_config.SelectboxColumn("Status", options=["active", "retired"]),
-           "monthly_cost": st.column_config.NumberColumn("Monthly cost $", min_value=0.0, format="%.2f"),
-           "notes": st.column_config.TextColumn("Notes"),
-           "publisher": st.column_config.TextColumn("Publisher (from Ringba)", help="The publisher this number is assigned to in Ringba. Their affiliate managers can be copied on the inactive-DID email."),
+           "campaign": st.column_config.TextColumn("Campaign name"),
+           "publisher": st.column_config.TextColumn("Publisher Name", help="The publisher this number is assigned to in Ringba."),
+           "created_added": st.column_config.TextColumn("DID Created Date", help="Ringba creation (allocation) time. For hand-added DIDs: the day you added it."),
            "next_charge": st.column_config.TextColumn("Next charge", help="When Ringba bills this number next."),
-           "created_added": st.column_config.TextColumn("Created in Ringba", help="Ringba creation time (allocation date). For hand-added DIDs: the day you added it."),
-           "last_call": st.column_config.TextColumn("Last call"),
-           "idle_days": st.column_config.NumberColumn("Days without calls"),
-           "calls_30d": st.column_config.NumberColumn("Calls (30d)")}
+           "number": st.column_config.TextColumn("DID", required=True),
+           "last_call": st.column_config.TextColumn("Last Call Date"),
+           "calls_30d": st.column_config.NumberColumn("Total calls last 30 days"),
+           "follow_up": st.column_config.TextColumn("Follow up note from AM", width="large",
+                                                    help="The latest answer or email reply from the affiliate manager. Full history: 'History of a DID' below."),
+           "case": st.column_config.TextColumn("Case", help="Open / Follow-up / Done, for the newest inactive-DID alert."),
+           "status": st.column_config.SelectboxColumn("Status", options=["active", "retired"]),
+           "label": st.column_config.TextColumn("Label"),
+           "monthly_cost": st.column_config.NumberColumn("Monthly cost $", min_value=0.0, format="%.2f"),
+           "notes": st.column_config.TextColumn("Team notes"),
+           "idle_days": st.column_config.NumberColumn("Days without calls")}
     table_editor("did", df, cfg, ["number", "label", "status", "monthly_cost", "notes"], "dids", tf, required=("number",),
-                 disabled=["publisher", "next_charge", "created_added", "last_call", "idle_days", "calls_30d"], insert_extra={"added_at": db.now_utc()})
+                 disabled=["campaign", "publisher", "created_added", "next_charge", "last_call", "calls_30d", "follow_up", "case", "idle_days"],
+                 insert_extra={"added_at": db.now_utc()})
+
+    with st.expander("📜 History of a DID (every alert, answer and note, saved for later review)"):
+        flash("flash_didnote")
+        nums = {r["number"]: r["id"] for r in rows}
+        if not nums:
+            st.caption("No DIDs yet.")
+        else:
+            pick = st.selectbox("DID", sorted(nums), key="did_hist_pick")
+            did_id = nums[pick]
+            hist = db.q("SELECT id, created_at, subject, status, case_status FROM alerts WHERE alert_type='did_inactive' "
+                        "AND snooze_key=:k AND status<>'skipped' ORDER BY id DESC", k=f"did:{did_id}")
+            if not hist:
+                st.caption("No inactive-DID alert has been created for this DID yet.")
+            for h in hist:
+                st.markdown(f"**Alert #{h['id']}** · {fmt(h['created_at'])} · {cases.label(h['case_status'])}")
+                st.caption(h["subject"])
+                tl = cases.timeline(h["id"])
+                if tl:
+                    d = pd.DataFrame(tl)
+                    d["created_at"] = d["created_at"].map(fmt)
+                    st.dataframe(d[["created_at", "source", "author", "text", "status_after"]], hide_index=True)
+                else:
+                    st.caption("No notes yet.")
+            if hist:
+                with st.form(f"did_note_form_{did_id}"):
+                    who = st.text_input("Your name", key=f"did_note_who_{did_id}")
+                    stt = st.selectbox("Mark the newest alert as", cases.STATUSES, format_func=cases.label,
+                                       index=1, key=f"did_note_st_{did_id}")
+                    txt = st.text_area("Follow-up / done note", key=f"did_note_txt_{did_id}")
+                    go = st.form_submit_button("💾 Save note")
+                if go:
+                    if not (txt or "").strip():
+                        set_flash("flash_didnote", "err", "Write a note first.")
+                    else:
+                        cases.add_note(hist[0]["id"], "team", who, txt, stt)
+                        set_flash("flash_didnote", "ok", "Note saved.")
+                    st.rerun()
 
     with st.expander("➕ Add / import DIDs (including numbers that never got a call)"):
         flash("flash_did_import")
@@ -691,6 +802,9 @@ def page_emails():
         f_reply = c3.text_input("Reply-to address(es)", db.get_setting("reply_to", ""), key="snd_reply")
         sv = st.form_submit_button("💾 Save sender")
     st.caption(f"Emails currently go out as: {name + ' ' if name else ''}<{addr or 'SMTP_USER not set'}>")
+    if db.get_setting("reply_to", "").strip():
+        st.warning("A reply-to address is set, so email replies go to THAT mailbox, which this tool cannot read. For replies to be saved as "
+                   "follow-up notes on the DID page, leave Reply-to empty (replies then come back to the alert mailbox).")
     if sv:
         try:
             validate_emails(f_mail, "From address")
@@ -786,6 +900,11 @@ def page_templates():
 
     with st.expander("Placeholders you can use in the subject and message"):
         st.markdown("\n".join(f"- `{{{k}}}`: {d}" for k, d in templates.PLACEHOLDERS[atype]))
+    with st.expander("✍️ Formatting: bold, bullets, numbers, links (type these in the message)"):
+        st.markdown("The message is turned into a proper email. Type the left column; the email shows the right column.")
+        st.markdown("\n".join(f"- `{a_}`  →  {b_}" for a_, b_ in templates.FORMAT_HELP))
+        st.caption("Example:  `**Decision needed:** release {did}?`  then a line  `- **Publisher:** {publisher}`.  "
+                   "Press Preview to see exactly how it will look.")
     ver = st.session_state.get("tplver", 0)
     kk = f"{atype}_{t['id']}_{ver}"
     with st.form(f"tpl_form_{kk}"):
@@ -815,11 +934,15 @@ def page_templates():
         st.rerun()
     if preview:
         sample = templates.SAMPLE[atype]
-        st.markdown("**Preview (with example data):**")
-        st.text(f"Subject: {db.get_setting('subject_prefix', '')} {templates.render(subject, sample)}\n\n{templates.render(body, sample)}")
+        plain_p, html_p = templates.render_body(body, sample)
+        st.markdown("**Preview of the email (with example data):**")
+        st.markdown(f"**Subject:** {db.get_setting('subject_prefix', '')} {templates.render(subject, sample)}")
+        st.markdown(html_p, unsafe_allow_html=True)
         defs = actions.defs_for(atype)
         if defs:
-            st.text("Please choose one (click a link):\n" + "\n".join(f"  * {d['label']}" for d in defs))
+            st.markdown("**Please choose one:**  " + "   ".join(f"`[ {d['label']} ]`" for d in defs))
+        with st.expander("Plain-text version (for mail apps that do not show formatting)"):
+            st.text(plain_p)
     c1, c2 = st.columns(2)
     if c1.button(f"✅ Use this template for '{choice}'", key=f"use_{atype}_{t['id']}"):
         db.x("UPDATE alert_rules SET template_id=:t WHERE alert_type=:a", t=t["id"], a=atype)
@@ -867,30 +990,108 @@ def page_log():
     flash("flash_log")
     counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) AS n FROM alerts GROUP BY status")}
     st.write(" · ".join(f"**{k}**: {v}" for k, v in sorted(counts.items())) or "No alerts yet.")
-    c1, c2, c3 = st.columns(3)
+    err = db.get_setting("inbox_last_error", "")
+    st.caption("Email replies from affiliate managers are read automatically." + (f"  ⚠️ Problem reading the mailbox: {err}" if err else
+               (f"  Last checked: {ago(db.get_setting('inbox_last_ok'))}." if db.get_setting("inbox_last_ok") else "")))
+    c1, c2, c3, c4 = st.columns(4)
     if c1.button("📤 Send pending alerts now"):
         st.success(str(mailer.process_outbox()))
     if c2.button("🔁 Retry failed alerts"):
         n = db.x("UPDATE alerts SET status='pending', attempts=0 WHERE status='failed'")
         st.success(f"{n} alerts put back in the queue. Press 'Send pending alerts now'.")
-    show = c3.multiselect("Show status", ["pending", "sent", "dry_run", "failed", "skipped"],
-                          default=["pending", "sent", "dry_run", "failed"])
-    if show:
-        rows = db.q_in("SELECT id, created_at, alert_type, subject, to_emails, cc_emails, status, attempts, last_error, "
-                       "response_label, responded_by, responded_at FROM alerts WHERE status IN :s ORDER BY id DESC LIMIT 300",
+    if c3.button("🗄️ Prepare backup (ZIP)"):
+        st.session_state["backup_zip"] = backup.build_zip()
+    if st.session_state.get("backup_zip"):
+        fname, data = st.session_state["backup_zip"]
+        c4.download_button("⬇️ Download " + fname, data, fname, "application/zip", key="dl_backup")
+    f1, f2 = st.columns(2)
+    show = f1.multiselect("Show status", ["pending", "sent", "dry_run", "failed", "skipped"], default=["pending", "sent", "dry_run", "failed"])
+    case_f = f2.multiselect("Team status", cases.STATUSES, default=cases.STATUSES, format_func=cases.label)
+    if show and case_f:
+        rows = db.q_in("SELECT id, created_at, alert_type, subject, to_emails, cc_emails, status, attempts, last_error, case_status, "
+                       "response_label, response_note, responded_by, responded_at FROM alerts WHERE status IN :s ORDER BY id DESC LIMIT 400",
                        "s", show)
+        rows = [r for r in rows if (r["case_status"] or "open") in case_f]
         if not rows:
             st.info("Nothing to show.")
         else:
-            d = pd.DataFrame(rows)
-            d["created_at"] = d["created_at"].map(fmt)
-            d["responded_at"] = d["responded_at"].map(lambda v: "" if pd.isna(v) else fmt(v))
-            st.dataframe(d, hide_index=True)
-            pick = st.selectbox("Read one alert (id)", [r["id"] for r in rows])
+            last_note = {}
+            for n in db.q("SELECT alert_id, source, author, text FROM alert_notes ORDER BY id"):
+                who_ = n["author"] or {"answer": "AM", "email": "AM", "team": "Team"}.get(n["source"], "")
+                last_note[n["alert_id"]] = f"{n['text']}  - {who_} ({n['source']})"
+            recs = [{"id": r["id"], "created": fmt(r["created_at"]), "type": r["alert_type"], "subject": r["subject"],
+                     "team_status": cases.label(r["case_status"]), "am_answer": r["response_label"] or "",
+                     "note_for_team": r["response_note"] or "", "latest_note": last_note.get(r["id"], ""), "add_note": "",
+                     "answered_by": r["responded_by"] or "", "answered_at": fmt(r["responded_at"]) if r["responded_at"] else "",
+                     "sent": r["status"], "to": r["to_emails"], "cc": r["cc_emails"], "error": r["last_error"] or ""} for r in rows]
+            cols = ["id", "created", "type", "subject", "team_status", "am_answer", "note_for_team", "latest_note", "add_note",
+                    "answered_by", "answered_at", "sent", "to", "cc", "error"]
+            df = frame(recs, cols)
+            st.caption("**Team status** is the dropdown in the table: change it (for example to *Done* once you did what the answer says), "
+                       "type a note in **Add a note** if you like, then press **Save status / notes** once. Every change is kept in the history.")
+            ver = st.session_state.get("logver", 0)
+            cfg = {"id": st.column_config.NumberColumn("#"),
+                   "created": st.column_config.TextColumn("Created"), "type": st.column_config.TextColumn("Alert type"),
+                   "subject": st.column_config.TextColumn("Subject", width="large"),
+                   "team_status": st.column_config.SelectboxColumn("Team status", options=[cases.STATUS_LABEL[s] for s in cases.STATUSES], width="medium"),
+                   "am_answer": st.column_config.TextColumn("AM answer (button)"),
+                   "note_for_team": st.column_config.TextColumn("Note for the team (from the answer page)", width="large"),
+                   "latest_note": st.column_config.TextColumn("Latest note / email reply", width="large"),
+                   "add_note": st.column_config.TextColumn("Add a note", width="large"),
+                   "answered_by": st.column_config.TextColumn("Answered by"), "answered_at": st.column_config.TextColumn("Answered at"),
+                   "sent": st.column_config.TextColumn("Email status"), "to": st.column_config.TextColumn("To"),
+                   "cc": st.column_config.TextColumn("CC"), "error": st.column_config.TextColumn("Error")}
+            with st.form("log_table_form"):
+                edited = st.data_editor(df, key=f"ed_logtbl_{ver}", column_config=cfg, hide_index=True, num_rows="fixed",
+                                        disabled=[c for c in cols if c not in ("team_status", "add_note")])
+                who_t = st.text_input("Your name (saved with your changes)", key="log_who_table")
+                go_t = st.form_submit_button("💾 Save status / notes")
+            if go_t:
+                orig_by = {int(r["id"]): r for _, r in df.iterrows()}
+                changed = 0
+                for _, r in edited.iterrows():
+                    aid = int(r["id"])
+                    new_status = cases.LABEL_STATUS.get(clean(r["team_status"]))
+                    note_txt = clean(r["add_note"])
+                    status_changed = bool(new_status) and new_status != cases.LABEL_STATUS.get(orig_by[aid]["team_status"])
+                    if note_txt or status_changed:
+                        cases.add_note(aid, "team", who_t, note_txt or f"Status changed to {cases.STATUS_LABEL[new_status]}",
+                                       new_status if status_changed else None)
+                        changed += 1
+                st.session_state["logver"] = ver + 1
+                set_flash("flash_log", "ok", f"Saved {changed} update(s)." if changed else "Nothing was changed.")
+                st.rerun()
+
+            pick = st.selectbox("Open one alert (id)", [r["id"] for r in rows], key="log_pick")
             a = db.q1("SELECT * FROM alerts WHERE id=:i", i=pick)
             if a:
-                ans = f"\nANSWER: {a['response_label']} (by {a['responded_by'] or '?'}) {a['response_note'] or ''}" if a["response_label"] else ""
-                st.text(f"To: {a['to_emails']}\nCC: {a['cc_emails']}\nSubject: {a['subject']}\nStatus: {a['status']}  {a['last_error'] or ''}{ans}\n\n{a['body']}")
+                ans = ""
+                if a["response_label"]:
+                    ans = (f"\nANSWER: {a['response_label']}  (by {a['responded_by'] or '?'})"
+                           + (f"\nNOTE FOR THE TEAM: {a['response_note']}" if a["response_note"] else ""))
+                st.text(f"To: {a['to_emails']}\nCC: {a['cc_emails']}\nSubject: {a['subject']}\nEmail status: {a['status']}  {a['last_error'] or ''}{ans}\n\n{a['body']}")
+                st.markdown("**History: answers, email replies and team notes (saved permanently)**")
+                tl = cases.timeline(pick)
+                if tl:
+                    t = pd.DataFrame(tl)
+                    t["created_at"] = t["created_at"].map(fmt)
+                    st.dataframe(t[["created_at", "source", "author", "text", "status_after"]], hide_index=True)
+                else:
+                    st.caption("No notes yet.")
+                cur = a["case_status"] or "open"
+                with st.form(f"case_form_{pick}"):
+                    who = st.text_input("Your name", key=f"case_who_{pick}")
+                    stt = st.selectbox("Team status", cases.STATUSES, index=cases.STATUSES.index(cur) if cur in cases.STATUSES else 0,
+                                       format_func=cases.label, key=f"case_st_{pick}")
+                    txt = st.text_area("Note", key=f"case_txt_{pick}")
+                    go = st.form_submit_button("💾 Save note")
+                if go:
+                    if not (txt or "").strip() and stt == cur:
+                        set_flash("flash_log", "err", "Write a note or change the status.")
+                    else:
+                        cases.add_note(pick, "team", who, (txt or "").strip() or f"Status changed to {cases.label(stt)}", stt)
+                        set_flash("flash_log", "ok", "Saved.")
+                    st.rerun()
 
     st.subheader("Paused (snoozed) alerts")
     sn = [r for r in db.q("SELECT entity_key, snooze_until, reason FROM snoozes") if db.to_dt(r["snooze_until"]) > db.now_utc()]
@@ -970,6 +1171,10 @@ def page_settings():
         prefix = c2.text_input("Email subject prefix", db.get_setting("subject_prefix"), key="set_prefix")
         nm = c1.number_input("Refresh the DID list from Ringba every N minutes", 5, 1440, int(float(db.get_setting("numbers_sync_minutes") or 60)), key="set_nm")
         auto_ret = c2.checkbox("Mark DIDs that disappear from Ringba as retired", value=str(db.get_setting("numbers_auto_retire")).lower() == "true", key="set_autoret")
+        replies = c1.checkbox("Read email replies from affiliate managers", value=str(db.get_setting("read_replies")).lower() == "true", key="set_replies",
+                              help="Reads the mailbox the alerts are sent from (IMAP must be on). Replies are saved as follow-up notes.")
+        imap = c2.text_input("Mailbox server (IMAP). Empty = automatic", db.get_setting("imap_host", ""), key="set_imap")
+        bk = c1.number_input("Email me a backup every N days (0 = never)", 0, 365, int(float(db.get_setting("backup_email_days") or 7)), key="set_bk")
         app_url = st.text_input("Your app link (used for the answer buttons in emails)", db.get_setting("app_url", ""), key="set_url",
                                 help="Example: https://your-app-name.streamlit.app")
         real = st.checkbox("✅ Send REAL emails (untick = DRY RUN, nothing is sent)", value=not mailer.is_dry_run(), key="set_real",
@@ -992,6 +1197,9 @@ def page_settings():
             db.set_setting("app_url", app_url.strip().rstrip("/"))
             db.set_setting("numbers_sync_minutes", int(nm))
             db.set_setting("numbers_auto_retire", "true" if auto_ret else "false")
+            db.set_setting("read_replies", "true" if replies else "false")
+            db.set_setting("imap_host", imap.strip())
+            db.set_setting("backup_email_days", int(bk))
             if not config.DRY_RUN_ENV:
                 db.set_setting("dry_run", "false" if real else "true")
             set_flash("flash_settings", "ok", "Saved.")

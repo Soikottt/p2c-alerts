@@ -6,13 +6,17 @@
  - formatTimeZone = America/New_York
  - callDt comes back as a 13-digit unix-millisecond number (divided by 1000 -> timezone-aware datetime)
  - rows live in response["callLog"]["data"]  OR  response["report"]["records"]
- - pagination = {"page": n, "pageSize": 500}, loop until a page has fewer than 500 rows
- - time.sleep(1) between page requests; HTTP 429 is retried with a pause
+ - PAGING: Ringba ignores "page"/"pageSize" and returns only 20 rows. The working way is "offset" + "size":
+   ask for `size` rows at `offset`, move the offset forward, stop when a request returns no rows.
+   A seen_ids set stops the loop if Ringba ever ignores the offset and repeats the same rows.
+ - time.sleep(1) between requests; HTTP 429 is retried with a pause
 
 Numbers (DIDs):  GET https://api.ringba.com/v2/{accountId}/numbers  -> JSON array of every tracking number on the account
 """
 import csv
+import hashlib
 import io
+import json
 import re
 import time
 from datetime import datetime, timezone
@@ -25,13 +29,48 @@ import config
 
 NY = ZoneInfo("America/New_York")
 BASE = "https://api.ringba.com/v2"
-PAGE_SIZE = 500
-PAGE_PAUSE = 1.0          # seconds between page requests (avoids HTTP 429)
-MAX_PAGES = 400
+PAGE_SIZE = 100          # rows asked for per request ("size")
+PAGE_PAUSE = 1.0         # seconds between requests (avoids HTTP 429)
+MAX_REQUESTS = 5000      # hard stop so a misbehaving API can never loop forever
 
 
 class RingbaError(Exception):
     pass
+
+
+# ---- time budget: the 5-minute engine must never run past its slot. Backfills set no budget.
+_budget = {"deadline": None}
+
+
+def set_deadline(seconds=None):
+    """Everything below stops (with a clear RingbaError) when this many seconds have passed. None = no limit."""
+    _budget["deadline"] = (time.monotonic() + seconds) if seconds else None
+
+
+def time_left():
+    d = _budget["deadline"]
+    return None if d is None else d - time.monotonic()
+
+
+def _check_time():
+    left = time_left()
+    if left is not None and left <= 0:
+        raise RingbaError("This run ran out of time talking to Ringba. It will continue on the next run.")
+
+
+def _nap(seconds):
+    """sleep, but never beyond the budget"""
+    left = time_left()
+    if left is not None:
+        if left <= 0:
+            _check_time()
+        seconds = min(seconds, max(left, 0))
+    time.sleep(seconds)
+
+
+def _request_timeout(default):
+    left = time_left()
+    return default if left is None else max(5, min(default, left))
 
 
 # The nine columns you required ...
@@ -40,7 +79,7 @@ REQUIRED_COLUMNS = ["callDt", "inboundCallId", "publisherId", "publisherName", "
 # ... plus the ones the alerts and caps need. IMPORTANT: inboundPhoneNumber is the CALLER's number.
 # The DID (the number that was dialed) is tag:DialedNumber:Number / number / numberId.
 CORE_EXTRA = ["tag:DialedNumber:Number", "number", "numberId", "hasConverted", "hasPayout"]
-FULL_EXTRA = ["targetName", "campaignName", "isLive", "isDuplicate", "wasBlocked", "isIncomplete",
+FULL_EXTRA = ["targetName", "campaignName", "campaignId", "isLive", "isDuplicate", "wasBlocked", "isIncomplete",
               "callLengthInSeconds", "conversionAmount", "payoutAmount", "profitNet", "telcoCost"]
 COLUMN_SETS = [REQUIRED_COLUMNS + CORE_EXTRA + FULL_EXTRA, REQUIRED_COLUMNS + CORE_EXTRA, REQUIRED_COLUMNS]
 _working_set = {"i": 0}   # remembers which set Ringba accepted
@@ -56,6 +95,7 @@ KEYS = {
     "buyer_name": ["buyer", "buyerName", "Buyer"],
     "target_name": ["targetName", "Target"],
     "campaign_name": ["campaignName", "Campaign"],
+    "campaign_id": ["campaignId", "Campaign ID"],
     "caller": ["inboundPhoneNumber", "Caller ID"],
     "did": ["tag:DialedNumber:Number", "number", "dialedNumber", "Number"],
     "did_id": ["numberId", "Number ID"],
@@ -190,6 +230,7 @@ def row_to_record(row, keymap=None):
         "publisher_rid": as_str(g("publisher_id")), "publisher_name": as_str(g("publisher_name")),
         "buyer_rid": as_str(g("buyer_id")), "buyer_name": as_str(g("buyer_name")),
         "target_name": as_str(g("target_name")), "campaign_name": as_str(g("campaign_name")),
+        "campaign_rid": as_str(g("campaign_id")),
         "caller": as_str(g("caller")), "did": normalize_phone(g("did")), "did_rid": as_str(g("did_id")),
         "connected": as_bool(g("connected")), "converted": as_bool(g("converted")), "paid": as_bool(g("paid")),
         "is_live": as_bool(g("is_live")), "is_duplicate": as_bool(g("duplicate")),
@@ -257,14 +298,15 @@ def _z(dt):
 
 
 def _post(url, headers, body, retries=6):
-    """POST with patience: 429 (rate limit) and 5xx are retried after a pause."""
+    """POST with patience: 429 (rate limit) and 5xx are retried after a pause (never longer than the time budget)."""
     last = None
     for attempt in range(1, retries + 1):
+        _check_time()
         try:
-            r = requests.post(url, headers=headers, json=body, timeout=120)
+            r = requests.post(url, headers=headers, json=body, timeout=_request_timeout(120))
         except requests.RequestException as e:
             last = f"network error: {e}"
-            time.sleep(2 * attempt)
+            _nap(2 * attempt)
             continue
         if r.status_code == 200:
             return r
@@ -277,40 +319,61 @@ def _post(url, headers, body, retries=6):
             raise RingbaError(f"BAD_REQUEST {last}")
         if r.status_code == 429:
             wait = r.headers.get("Retry-After")
-            time.sleep(min(float(wait), 90) if wait and wait.replace(".", "").isdigit() else min(10 * attempt, 90))
+            _nap(min(float(wait), 90) if wait and wait.replace(".", "").isdigit() else min(10 * attempt, 90))
         else:
-            time.sleep(3 * attempt)
+            _nap(3 * attempt)
     raise RingbaError(f"Ringba request failed after {retries} tries: {last}")
 
 
+def _row_call_id(row, key):
+    """The call id; if a row has none, a fingerprint of the whole row, so repeated rows are still recognised."""
+    cols = row.get("columns", row) if isinstance(row, dict) else {}
+    cid = as_str(cols.get(key)) if key else None
+    if cid is None:
+        cid = "row:" + hashlib.md5(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()
+    return cid
+
+
 def _fetch_pages(url, headers, start, end, columns):
-    all_rows, page, prev_first = [], 1, None
-    while page <= MAX_PAGES:
+    """Download EVERY call in [start, end] with offset/size paging. Returns (rows, number_of_requests)."""
+    all_rows, seen_ids = [], set()
+    offset, requests_made, call_id_key = 0, 0, None
+    while requests_made < MAX_REQUESTS:
+        _check_time()
         body = {
             "reportStart": _z(start), "reportEnd": _z(end),
             "valueColumns": [{"column": c} for c in columns],
             "orderByColumns": [{"column": "callDt", "direction": "asc"}],
             "formatTimeZone": "America/New_York",
-            "pagination": {"page": page, "pageSize": PAGE_SIZE},
+            "offset": offset,
+            "size": PAGE_SIZE,
         }
         r = _post(url, headers, body)
+        requests_made += 1
         try:
             data = r.json()
         except ValueError:
             raise RingbaError(f"Ringba did not return JSON: {r.text[:300]}")
-        rows = extract_rows(data)
-        if not rows:
-            break
-        first = (rows[0].get("columns", rows[0]) if isinstance(rows[0], dict) else {}).get("inboundCallId")
-        if page > 1 and first is not None and first == prev_first:
-            break                      # the same page again: pagination is being ignored, stop
-        prev_first = first
-        all_rows.extend(rows)
-        if len(rows) < PAGE_SIZE:
-            break
-        page += 1
-        time.sleep(PAGE_PAUSE)         # be gentle: avoids HTTP 429
-    return all_rows
+        raw_calls = extract_rows(data)
+        if not raw_calls:
+            break                                   # nothing left
+        if call_id_key is None:
+            first = raw_calls[0].get("columns", raw_calls[0]) if isinstance(raw_calls[0], dict) else {}
+            call_id_key = _find_key(first, "call_id")
+        new_this_page = 0
+        for row in raw_calls:
+            cid = _row_call_id(row, call_id_key)
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                new_this_page += 1
+                all_rows.append(row)
+        if new_this_page == 0:
+            break                                   # safety: Ringba ignored the offset and repeated itself
+        # Move forward by the rows we really received. Same as "+ size" when Ringba returns `size` rows,
+        # but never skips calls if it returns fewer (for example its default of 20).
+        offset += len(raw_calls)
+        _nap(PAGE_PAUSE)                            # be gentle: avoids HTTP 429
+    return all_rows, requests_made
 
 
 def fetch_range(start, end):
@@ -319,10 +382,10 @@ def fetch_range(start, end):
         raise RingbaError("RINGBA_API_TOKEN or RINGBA_ACCOUNT_ID is missing in your Secrets.")
     url = f"{BASE}/{config.RINGBA_ACCOUNT_ID}/calllogs"
     headers = {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
-    raw_rows = None
+    raw_rows, n_requests = None, 0
     for i in range(_working_set["i"], len(COLUMN_SETS)):
         try:
-            raw_rows = _fetch_pages(url, headers, start, end, COLUMN_SETS[i])
+            raw_rows, n_requests = _fetch_pages(url, headers, start, end, COLUMN_SETS[i])
             _working_set["i"] = i
             break
         except RingbaError as e:
@@ -331,7 +394,7 @@ def fetch_range(start, end):
             raise RingbaError(str(e).replace("BAD_REQUEST ", "Ringba rejected the request: "))
     missing, mapped = _check_first_row(raw_rows)
     report = {"headers": len(mapped), "mapped": mapped, "missing": missing, "rows": len(raw_rows),
-              "skipped": 0, "column_set": ["full", "core", "minimal"][_working_set["i"]],
+              "skipped": 0, "requests": n_requests, "column_set": ["full", "core", "minimal"][_working_set["i"]],
               "first_row_keys": sorted((raw_rows[0].get("columns", raw_rows[0]) if raw_rows else {}).keys())}
     if missing or not raw_rows:
         return [], report
@@ -402,11 +465,12 @@ def extract_number_items(data):
 def _get(url, headers, retries=6):
     last = None
     for attempt in range(1, retries + 1):
+        _check_time()
         try:
-            r = requests.get(url, headers=headers, timeout=60)
+            r = requests.get(url, headers=headers, timeout=_request_timeout(60))
         except requests.RequestException as e:
             last = f"network error: {e}"
-            time.sleep(2 * attempt)
+            _nap(2 * attempt)
             continue
         if r.status_code == 200:
             return r
@@ -417,9 +481,9 @@ def _get(url, headers, retries=6):
             raise RingbaError(f"Ringba says not found ({last}). Check RINGBA_ACCOUNT_ID.")
         if r.status_code == 429:
             wait = r.headers.get("Retry-After")
-            time.sleep(min(float(wait), 90) if wait and wait.replace(".", "").isdigit() else min(10 * attempt, 90))
+            _nap(min(float(wait), 90) if wait and wait.replace(".", "").isdigit() else min(10 * attempt, 90))
         else:
-            time.sleep(3 * attempt)
+            _nap(3 * attempt)
     raise RingbaError(f"Ringba request failed after {retries} tries: {last}")
 
 
@@ -438,7 +502,7 @@ def parse_numbers(data):
     out, invalid, released, keys = [], 0, 0, set()
     mapped = {}
     for it in items:
-        aff_id = aff_name = next_charge = None
+        aff_id = aff_name = next_charge = campaign_id = None
         if isinstance(it, str):
             num, label, rid, created = normalize_phone(it), None, None, None
         elif isinstance(it, dict):
@@ -451,6 +515,7 @@ def parse_numbers(data):
             rid = as_str(_pick(it, NUM_KEYS["id"]))
             created = _when_any(_pick(it, NUM_KEYS["created"]))
             next_charge = _when_any(it.get("nextChargeDT"))
+            campaign_id = as_str(it.get("campaignId"))
             aff = it.get("affiliate")
             if isinstance(aff, dict) and not aff.get("isSelf"):      # "You" = your own account, not a publisher
                 aff_id, aff_name = as_str(aff.get("id")), as_str(aff.get("name"))
@@ -466,7 +531,8 @@ def parse_numbers(data):
             invalid += 1
             continue
         out.append({"number": num, "label": label, "created_at": created, "rid": rid,
-                    "affiliate_id": aff_id, "affiliate_name": aff_name, "next_charge": next_charge})
+                    "affiliate_id": aff_id, "affiliate_name": aff_name, "next_charge": next_charge,
+                    "campaign_id": campaign_id})
     report = {"count": len(items), "parsed": len(out), "invalid": invalid, "released": released, "mapped": mapped,
               "first_item_keys": sorted(keys)[:40], "with_created_date": sum(1 for o in out if o["created_at"]),
               "with_publisher": sum(1 for o in out if o["affiliate_name"])}

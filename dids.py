@@ -85,7 +85,7 @@ def upsert_dids(items):
     publisher and next-charge date kept up to date. Items may come from Ringba, a pasted list or a file."""
     now = db.now_utc()
     have = {r["number"]: r for r in db.q("SELECT id, number, label, ringba_number_id, added_at, publisher_id, "
-                                         "affiliate_name, next_charge_at FROM dids")}
+                                         "affiliate_name, next_charge_at, campaign_id FROM dids")}
     by_rid, by_name = _publisher_lookup()
     added = updated = skipped = 0
     for it in items:
@@ -93,12 +93,12 @@ def upsert_dids(items):
         pid = by_rid.get(aff_id) or by_name.get((aff_name or "").strip().lower()) if (aff_id or aff_name) else None
         row = have.get(it["number"])
         if row is None:
-            db.x("INSERT INTO dids (number, ringba_number_id, label, status, added_at, publisher_id, affiliate_name, next_charge_at) "
-                 "VALUES (:n,:r,:l,'active',:a,:p,:an,:nc)", n=it["number"], r=it["rid"], l=it["label"],
-                 a=it["created_at"] or now, p=pid, an=aff_name, nc=nxt)
+            db.x("INSERT INTO dids (number, ringba_number_id, label, status, added_at, publisher_id, affiliate_name, next_charge_at, campaign_id) "
+                 "VALUES (:n,:r,:l,'active',:a,:p,:an,:nc,:cid)", n=it["number"], r=it["rid"], l=it["label"],
+                 a=it["created_at"] or now, p=pid, an=aff_name, nc=nxt, cid=it.get("campaign_id"))
             have[it["number"]] = {"id": 0, "number": it["number"], "label": it["label"], "ringba_number_id": it["rid"],
                                   "added_at": it["created_at"] or now, "publisher_id": pid, "affiliate_name": aff_name,
-                                  "next_charge_at": nxt}
+                                  "next_charge_at": nxt, "campaign_id": it.get("campaign_id")}
             added += 1
             continue
         cur = db.to_dt(row["added_at"])
@@ -106,7 +106,8 @@ def upsert_dids(items):
         new_label = bool(it["label"]) and not row["label"]
         new_rid = bool(it["rid"]) and not row["ringba_number_id"]
         from_ringba = "affiliate_id" in it                      # only a Ringba sync knows who the DID is assigned to
-        new_pub = from_ringba and (pid != row["publisher_id"] or (aff_name or None) != (row["affiliate_name"] or None))
+        new_pub = from_ringba and (pid != row["publisher_id"] or (aff_name or None) != (row["affiliate_name"] or None)
+                                   or (it.get("campaign_id") or None) != (row.get("campaign_id") or None))
         cur_nc = db.to_dt(row["next_charge_at"]) if row["next_charge_at"] else None
         new_nc = bool(nxt) and (cur_nc is None or abs((nxt - cur_nc).total_seconds()) > 1)
         if new_date or new_label or new_rid or new_pub or new_nc:
@@ -115,7 +116,8 @@ def upsert_dids(items):
                  a=it["created_at"] if new_date else None, l=it["label"], r=it["rid"],
                  nc=nxt if new_nc else None, n=it["number"])
             if new_pub:
-                db.x("UPDATE dids SET publisher_id=:p, affiliate_name=:an WHERE number=:n", p=pid, an=aff_name, n=it["number"])
+                db.x("UPDATE dids SET publisher_id=:p, affiliate_name=:an, campaign_id=:cid WHERE number=:n",
+                     p=pid, an=aff_name, cid=it.get("campaign_id"), n=it["number"])
             updated += 1
         else:
             skipped += 1
@@ -190,3 +192,29 @@ def sync_if_due(now=None, force=False):
     db.set_setting("numbers_last_error", "")
     db.set_setting("numbers_next_run", (now + timedelta(minutes=minutes)).isoformat())
     return res
+
+
+# ---------------------------------------------------------------- what the DID table / email shows
+def campaign_names(did_rows):
+    """{did_id: campaign name}. Uses the campaign Ringba assigned the number to; else the campaign of its latest call."""
+    by_cid = {}
+    for r in db.q("SELECT campaign_rid, campaign_name FROM calls WHERE campaign_rid IS NOT NULL AND campaign_name IS NOT NULL "
+                  "GROUP BY campaign_rid, campaign_name"):
+        by_cid[r["campaign_rid"]] = r["campaign_name"]
+    latest = {}
+    for r in db.q("SELECT did_id, campaign_name, MAX(call_at) AS t FROM calls WHERE did_id IS NOT NULL AND campaign_name IS NOT NULL "
+                  "GROUP BY did_id, campaign_name"):
+        t = db.to_dt(r["t"])
+        if r["did_id"] not in latest or t > latest[r["did_id"]][0]:
+            latest[r["did_id"]] = (t, r["campaign_name"])
+    out = {}
+    for d in did_rows:
+        out[d["id"]] = (by_cid.get(d.get("campaign_id")) or (latest.get(d["id"]) or (None, None))[1]
+                        or (d.get("campaign_id") or ""))
+    return out
+
+
+def calls_last_30d(now=None):
+    since = (now or db.now_utc()) - timedelta(days=30)
+    return {r["did_id"]: r["n"] for r in db.q("SELECT did_id, COUNT(*) AS n FROM calls WHERE did_id IS NOT NULL AND call_at >= :s "
+                                              "GROUP BY did_id", s=since)}

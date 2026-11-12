@@ -25,6 +25,13 @@ SETTING_DEFAULTS = {
     "numbers_next_run": "",        # (internal) when the next DID sync is due
     "numbers_last_ok": "",         # (internal) last successful DID sync
     "numbers_last_error": "",      # (internal) last DID sync problem
+    "read_replies": "true",        # read email replies from affiliate managers (needs IMAP on the mailbox)
+    "imap_host": "",               # empty = guessed from SMTP_HOST (smtp.gmail.com -> imap.gmail.com)
+    "inbox_last_ok": "",           # (internal)
+    "inbox_last_error": "",        # (internal)
+    "inbox_next_run": "",          # (internal) after a failure, wait 30 minutes
+    "backup_email_days": "7",      # email a backup (CSV zip) to the admin every N days. 0 = never
+    "backup_next_run": "",         # (internal)
 }
 
 
@@ -33,7 +40,10 @@ def get_engine():
     if _engine is None:
         if not config.DB_URL:
             raise RuntimeError("DATABASE_URL is missing. Add it to your Secrets (or .env file).")
-        _engine = create_engine(config.DB_URL, pool_pre_ping=True, pool_recycle=300)
+        kwargs = {"pool_pre_ping": True, "pool_recycle": 300}
+        if str(config.DB_URL).startswith("postgresql"):
+            kwargs["connect_args"] = {"connect_timeout": 15}      # never wait forever for the database to answer
+        _engine = create_engine(config.DB_URL, **kwargs)
     return _engine
 
 

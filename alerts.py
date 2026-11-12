@@ -85,9 +85,11 @@ def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=N
         return False
     if snooze_key and is_snoozed(snooze_key):
         return False
+    body_html = None
     if subject is None:
         subj_t, body_t = templates.get_template(alert_type, rule)
-        subject, body = templates.render(subj_t, ctx), templates.render(body_t, ctx)
+        subject = templates.render(subj_t, ctx)
+        body, body_html = templates.render_body(body_t, ctx)      # plain text + formatted HTML version
     to, cc = build_recipients(rule, publisher_id, buyer_id)
     prefix = db.get_setting("subject_prefix", "[P2C Alert]")
     rows = db.q("""INSERT INTO alerts (alert_type, dedupe_key, subject, body, to_emails, cc_emails, status, attempts,
@@ -97,8 +99,10 @@ def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=N
                 cc=", ".join(cc), st=status, now=db.now_utc(), sk=snooze_key)
     if not rows:
         return False
-    if status == "pending":
-        text, html = actions.attach(rows[0]["id"], alert_type, body)
-        if html:
-            db.x("UPDATE alerts SET body=:b, body_html=:h WHERE id=:i", b=text, h=html, i=rows[0]["id"])
+    if status == "skipped":
+        return True
+    alert_id = rows[0]["id"]
+    full_subject = f"{prefix} {subject}".strip() + f" [#A{alert_id}]"     # replies keep this tag, so they can be matched
+    text, html = (actions.attach(alert_id, alert_type, body, body_html) if status == "pending" else (body, body_html))
+    db.x("UPDATE alerts SET subject=:s, body=:b, body_html=:h WHERE id=:i", s=full_subject, b=text, h=html, i=alert_id)
     return True

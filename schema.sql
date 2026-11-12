@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS dids (
   last_call_at TIMESTAMPTZ,
   publisher_id INTEGER,
   affiliate_name TEXT,
-  next_charge_at TIMESTAMPTZ
+  next_charge_at TIMESTAMPTZ,
+  campaign_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS calls (
@@ -61,6 +62,7 @@ CREATE TABLE IF NOT EXISTS calls (
   buyer_id INTEGER REFERENCES buyers(id),
   did_id INTEGER REFERENCES dids(id),
   campaign_name TEXT,
+  campaign_rid TEXT,
   target_name TEXT,
   caller_number TEXT,
   connected BOOLEAN NOT NULL DEFAULT FALSE,
@@ -130,7 +132,9 @@ CREATE TABLE IF NOT EXISTS alerts (
   response_label TEXT,
   responded_at TIMESTAMPTZ,
   responded_by TEXT,
-  response_note TEXT
+  response_note TEXT,
+  case_status TEXT DEFAULT 'open',
+  case_updated_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS ix_alerts_status ON alerts (status);
 CREATE INDEX IF NOT EXISTS ix_alerts_created ON alerts (created_at);
@@ -190,4 +194,23 @@ CREATE TABLE IF NOT EXISTS snoozes (
   entity_key TEXT PRIMARY KEY,
   snooze_until TIMESTAMPTZ NOT NULL,
   reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alert_notes (
+  id SERIAL PRIMARY KEY,
+  alert_id INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  author TEXT,
+  text TEXT NOT NULL,
+  status_after TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_alert_notes_alert ON alert_notes (alert_id);
+
+CREATE TABLE IF NOT EXISTS inbound_emails (
+  message_id TEXT PRIMARY KEY,
+  alert_id INTEGER,
+  from_email TEXT,
+  outcome TEXT,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

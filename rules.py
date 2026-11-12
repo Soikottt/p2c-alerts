@@ -141,8 +141,14 @@ def rule_inactive_dids(now):
         return 0
     days = int(rule["param_days"] or 30)
     made = 0
+    import cases
+    import dids as didtools
     pub_names = {p["id"]: p["name"] for p in db.q("SELECT id, name FROM publishers")}
-    for d in db.q("SELECT * FROM dids WHERE status = 'active'"):
+    active = db.q("SELECT * FROM dids WHERE status = 'active'")
+    camp = didtools.campaign_names(active)
+    calls30 = didtools.calls_last_30d(now)
+    notes = cases.latest_by_did()
+    for d in active:
         ref = to_dt(d["last_call_at"]) or to_dt(d["added_at"])
         if not ref:
             continue
@@ -154,7 +160,9 @@ def rule_inactive_dids(now):
                "idle_days": idle, "last_call": fmt(d["last_call_at"]) if d["last_call_at"] else "never",
                "added": fmt(d["added_at"]), "publisher": pub_names.get(d["publisher_id"]) or d["affiliate_name"] or "none",
                "next_charge": fmt(d["next_charge_at"], False) if d["next_charge_at"] else "unknown",
-               "monthly_cost": f"${float(d['monthly_cost']):.2f}" if d["monthly_cost"] is not None else "not set"}
+               "monthly_cost": f"${float(d['monthly_cost']):.2f}" if d["monthly_cost"] is not None else "not set",
+               "campaign": camp.get(d["id"]) or "unknown", "calls_30d": calls30.get(d["id"], 0),
+               "last_note": cases.one_line(notes.get(d["id"]), fmt) or "none yet"}
         if alerts.create_alert("did_inactive", f"did:{d['id']}:{ref.date()}:{cycle}", ctx, publisher_id=d["publisher_id"],
                                snooze_key=f"did:{d['id']}"):
             made += 1

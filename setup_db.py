@@ -59,12 +59,20 @@ ADD_COLUMNS = [
     ("dids", "publisher_id", "INTEGER"),
     ("dids", "affiliate_name", "TEXT"),
     ("dids", "next_charge_at", "TIMESTAMPTZ"),
+    ("dids", "campaign_id", "TEXT"),
+    ("calls", "campaign_rid", "TEXT"),
+    ("alerts", "case_status", "TEXT DEFAULT 'open'"),
+    ("alerts", "case_updated_at", "TIMESTAMPTZ"),
 ]
 
 # The first wording of the inactive-DID email. Saved templates that still have EXACTLY this text are upgraded.
 OLD_DID_BODY = ("DID {did}{label_part} has had no calls for {idle_days} days.\nCreated / added: {added}\n"
                 "Last call: {last_call}\nMonthly cost: {monthly_cost}\n\n"
                 "Decision needed: release this DID to avoid the monthly charge, or keep it for now?")
+OLD_DID_BODY_V2 = ("DID {did}{label_part} has had no calls for {idle_days} days.\nPublisher: {publisher}\n"
+                   "Created in Ringba: {added}\nLast call: {last_call}\nNext charge: {next_charge}\n"
+                   "Monthly cost: {monthly_cost}\n\n"
+                   "Decision needed: release this DID to avoid the next charge, or keep it for now?")
 
 OLD_TABLES = ["calls", "dids", "cap_rules", "cc_routing", "alerts_log", "publishers", "buyers"]
 
@@ -156,10 +164,11 @@ def _seed_templates_and_actions():
         db.x("UPDATE alert_rules SET template_id=(SELECT MIN(id) FROM email_templates WHERE alert_type=:t) "
              "WHERE alert_type=:t AND template_id IS NULL", t=atype)
     seeded = {r["alert_type"] for r in db.q("SELECT DISTINCT alert_type FROM alert_action_defs")}
-    old = db.q1("SELECT id, body FROM email_templates WHERE alert_type='did_inactive' AND name='Default'")
-    if old and old["body"] == OLD_DID_BODY:
-        subj, body = templates.DEFAULTS["did_inactive"]
-        db.x("UPDATE email_templates SET subject=:s, body=:b, updated_at=:n WHERE id=:i", s=subj, b=body, n=now, i=old["id"])
+    for atype, olds in templates.OLD_BODIES.items():      # unchanged built-in wording -> new formatted wording
+        row = db.q1("SELECT id, body FROM email_templates WHERE alert_type=:t AND name='Default'", t=atype)
+        if row and row["body"] in olds:
+            subj, body = templates.DEFAULTS[atype]
+            db.x("UPDATE email_templates SET subject=:s, body=:b, updated_at=:n WHERE id=:i", s=subj, b=body, n=now, i=row["id"])
     for i, (atype, label, effect, days) in enumerate(ACTION_SEEDS):
         if atype in seeded:
             continue

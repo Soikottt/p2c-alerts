@@ -23,21 +23,26 @@ def defs_for(alert_type):
                 "ORDER BY sort_order, id", t=alert_type)
 
 
-def build_html(body, links):
-    br = escape(body).replace("\n", "<br>")
+def plain_to_html(text):
+    return ('<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">'
+            + escape(text or "").replace("\n", "<br>") + "</div>")
+
+
+def build_html(body_html, links):
+    """The formatted email body followed by one button per answer option."""
     btn = ('display:inline-block;padding:10px 16px;margin:4px 6px 4px 0;background:#1a73e8;color:#ffffff;'
            'border-radius:6px;text-decoration:none;font-weight:bold')
     buttons = "".join(f'<a href="{escape(u)}" style="{btn}">{escape(l)}</a>' for l, u in links)
-    return ('<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">'
-            f'<div>{br}</div><p style="margin-top:18px"><b>Please choose one:</b></p><p>{buttons}</p>'
+    return (f'{body_html}<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px">'
+            f'<p style="margin-top:18px"><b>Please choose one:</b></p><p>{buttons}</p>'
             '<p style="color:#888;font-size:12px">Your answer is saved and the team is notified.</p></div>')
 
 
-def attach(alert_id, alert_type, body):
-    """Create one secret link per option. Returns (new_text_body, html_body or None)."""
+def attach(alert_id, alert_type, body, body_html=None):
+    """Create one secret link per option. Returns (text_body, html_body). Without buttons the body is returned as it is."""
     url, defs = app_url(), defs_for(alert_type)
     if not url or not defs:
-        return body, None
+        return body, body_html
     links = []
     for d in defs:
         tok = secrets.token_urlsafe(16)
@@ -46,7 +51,7 @@ def attach(alert_id, alert_type, body):
              d=d["effect_days"], n=db.now_utc())
         links.append((d["label"], f"{url}/?a={tok}"))
     text = body + "\n\nPlease choose one (click a link):\n" + "\n".join(f"  * {l}: {u}" for l, u in links)
-    return text, build_html(body, links)
+    return text, build_html(body_html or plain_to_html(body), links)
 
 
 def lookup(token):
@@ -70,6 +75,9 @@ def respond(token, who, note):
              note=(note or "").strip() or None, i=row["alert_id"])
     if n == 0:
         return {"ok": False, "msg": "Someone just answered this alert."}
+    import cases
+    cases.add_note(row["alert_id"], "answer", who, f"{row['label']}" + (f" - {note.strip()}" if (note or "").strip() else ""),
+                   cases.mark_follow_up_if_open(row["alert_id"]))
     effect_text = "Nothing changed automatically. Your team decides."
     key, eff = row["snooze_key"], row["effect"]
     if eff == "snooze" and key and row["effect_days"]:

@@ -6,7 +6,7 @@ from datetime import timedelta
 import db
 import ringba_client as rc
 
-CALL_COLS = ["call_id", "call_at", "publisher_id", "buyer_id", "did_id", "campaign_name", "target_name",
+CALL_COLS = ["call_id", "call_at", "publisher_id", "buyer_id", "did_id", "campaign_name", "campaign_rid", "target_name",
              "caller_number", "connected", "converted", "paid", "is_live", "is_duplicate", "blocked",
              "incomplete", "duration_sec", "connected_sec", "revenue", "payout", "profit", "telco_cost",
              "source", "created_at", "updated_at"]
@@ -108,7 +108,7 @@ def upsert_calls(records, source="live"):
         rows.append({
             "call_id": rec["call_id"], "call_at": rec["call_at"],
             "publisher_id": pubs.get(pk), "buyer_id": buys.get(bk), "did_id": dids.get(rec["did"]),
-            "campaign_name": rec["campaign_name"], "target_name": rec["target_name"],
+            "campaign_name": rec["campaign_name"], "campaign_rid": rec.get("campaign_rid"), "target_name": rec["target_name"],
             "caller_number": rec["caller"], "connected": rec["connected"], "converted": rec["converted"],
             "paid": rec["paid"], "is_live": rec["is_live"], "is_duplicate": rec["is_duplicate"],
             "blocked": rec["blocked"], "incomplete": rec["incomplete"],
