@@ -91,8 +91,8 @@ KEYS = {
     "call_iso": ["tag:Date:ISODate"],
     "publisher_id": ["publisherId", "Publisher ID"],
     "publisher_name": ["publisherName", "Publisher"],
-    "buyer_id": ["buyerId", "Buyer ID"],
-    "buyer_name": ["buyer", "buyerName", "Buyer"],
+    "buyer_id": ["buyerId", "targetId", "Buyer ID", "Target ID"],       # <-- ADDED targetId
+    "buyer_name": ["buyer", "buyerName", "targetName", "Buyer", "Target"], # <-- ADDED targetName
     "target_name": ["targetName", "Target"],
     "campaign_name": ["campaignName", "Campaign"],
     "campaign_id": ["campaignId", "Campaign ID"],
@@ -108,12 +108,11 @@ KEYS = {
     "incomplete": ["isIncomplete", "Incomplete"],
     "duration": ["callLengthInSeconds", "Duration", "tag:CallLength:Total"],
     "connected_len": ["connectedCallLengthInSeconds", "Connected Call Length"],
-    "revenue": ["conversionAmount", "Revenue"],
-    "payout": ["payoutAmount", "Payout"],
+    "revenue": ["conversionAmount", "Revenue", "revenue"],              # <-- ADDED lowercase revenue
+    "payout": ["payoutAmount", "Payout", "payout"],                     # <-- ADDED lowercase payout
     "profit": ["profitNet", "Profit Net Telco"],
     "telco_cost": ["telcoCost", "Telco Cost"],
 }
-
 
 # ---------- value helpers ----------
 def norm(h):
