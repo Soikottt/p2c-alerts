@@ -56,28 +56,51 @@ def rule_new_and_lapsed_publisher(now):
     new_on, lap_on = bool(nr and nr["enabled"]), bool(lr and lr["enabled"])
     if not (new_on or lap_on):
         return 0
+    
     n_first = int((nr or {}).get("param_count") or 10)
     lapse_days = int((lr or {}).get("param_days") or 30)
     made = 0
-    for c in _recent_live_calls(now):
+    
+    recent_calls = _recent_live_calls(now)
+    if not recent_calls:
+        return 0
+
+    # 1. Get all unique publisher IDs from the recent calls
+    pub_ids = list({c["publisher_id"] for c in recent_calls if c["publisher_id"]})
+    if not pub_ids:
+        return 0
+
+    # 2. Fetch ALL historical calls for these publishers in ONE query
+    hist_calls = db.q_in("SELECT call_id, publisher_id, call_at FROM calls WHERE publisher_id IN :ids ORDER BY call_at", "ids", pub_ids)
+    
+    # 3. Group the history by publisher ID
+    from collections import defaultdict
+    pub_history = defaultdict(list)
+    for hc in hist_calls:
+        pub_history[hc["publisher_id"]].append(hc)
+
+    # 4. Process the recent calls using the pre-loaded history
+    for c in recent_calls:
         if not c["publisher_id"]:
             continue
         t = to_dt(c["call_at"])
-        rank = db.q1("SELECT COUNT(*) AS n FROM calls WHERE publisher_id=:p AND "
-                     "(call_at < :t OR (call_at = :t AND call_id <= :cid))",
-                     p=c["publisher_id"], t=t, cid=c["call_id"])["n"]
+        
+        # Find the rank in Python (much faster than querying the database)
+        history = pub_history[c["publisher_id"]]
+        prev_calls = [h for h in history if h["call_at"] < t or (h["call_at"] == t and h["call_id"] <= c["call_id"])]
+        rank = len(prev_calls)
+
         if new_on and rank <= n_first:
             ctx = {**_call_ctx(c), "call_number": rank, "first_n": n_first}
             if alerts.create_alert("new_publisher", f"newpub:{c['publisher_id']}:{c['call_id']}", ctx,
                                    publisher_id=c["publisher_id"], buyer_id=c["buyer_id"]):
                 made += 1
+
         if lap_on and rank > 1:
-            prev = db.q1("SELECT MAX(call_at) AS t FROM calls WHERE publisher_id=:p AND "
-                         "(call_at < :t OR (call_at = :t AND call_id < :cid))",
-                         p=c["publisher_id"], t=t, cid=c["call_id"])["t"]
-            prev = to_dt(prev)
-            if prev and (t - prev) > timedelta(days=lapse_days):
-                ctx = {**_call_ctx(c), "gap_days": (t - prev).days, "last_call_time": fmt(prev)}
+            prev_call = prev_calls[-2]
+            prev_t = to_dt(prev_call["call_at"])
+            if prev_t and (t - prev_t) > timedelta(days=lapse_days):
+                ctx = {**_call_ctx(c), "gap_days": (t - prev_t).days, "last_call_time": fmt(prev_t)}
                 if alerts.create_alert("lapsed_publisher", f"lapsed:{c['publisher_id']}:{c['call_id']}", ctx,
                                        publisher_id=c["publisher_id"], buyer_id=c["buyer_id"]):
                     made += 1
