@@ -223,10 +223,21 @@ def column_order(name, df, column_config):
     return shown, [c for c in saved if c in shown] + [c for c in shown if c not in saved]
 
 
-def arrange_columns(name, shown, order):
-    """Move a column to any position. (Streamlit tables cannot remember a drag, so this is the saved way to do it.)"""
-    with st.expander("↔️ Arrange columns"):
-        label = lambda c: str(c).replace("_", " ")
+def column_widths(name):
+    try:
+        w = json.loads(db.get_setting(f"colwidth_{name}") or "{}")
+        return {k: int(v) for k, v in w.items() if str(v).isdigit() or isinstance(v, int)}
+    except (ValueError, TypeError):
+        return {}
+
+
+def view_controls(name, df, column_config):
+    """'Arrange columns' box for one table: move a column to any position and set its width in pixels. Both are saved
+    (per table) and come back after you close the app. Returns (column order, column_config with the saved widths)."""
+    shown, order = column_order(name, df, column_config)
+    widths = column_widths(name)
+    label = lambda c: str(c).replace("_", " ")
+    with st.expander("↔️ Arrange columns / column width"):
         c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
         col = c1.selectbox("Column", order, format_func=label, key=f"mv_col_{name}")
         pos = c2.number_input("Move to position (1 = first)", 1, len(order), min(order.index(col) + 1, len(order)),
@@ -240,7 +251,27 @@ def arrange_columns(name, shown, order):
         if c4.button("Reset", key=f"mv_reset_{name}"):
             db.set_setting(f"colorder_{name}", "[]")
             st.rerun()
-        st.caption("Now: " + "  ›  ".join(label(c) for c in order))
+        w1, w2, w3, w4 = st.columns([3, 2, 1, 1])
+        wcol = w1.selectbox("Column to resize", order, format_func=label, key=f"w_col_{name}")
+        wpx = w2.number_input("Width in pixels (small = 70, normal = 150, wide = 300)", 40, 900, int(widths.get(wcol, 150)), step=10,
+                              key=f"w_px_{name}_{wcol}")
+        w3.write(""); w4.write("")
+        if w3.button("Set width", key=f"w_go_{name}"):
+            widths[wcol] = int(wpx)
+            db.set_setting(f"colwidth_{name}", json.dumps(widths))
+            st.rerun()
+        if w4.button("Reset", key=f"w_reset_{name}"):
+            db.set_setting(f"colwidth_{name}", "{}")
+            st.rerun()
+        st.caption("Order now: " + "  ›  ".join(label(c) for c in order))
+        if widths:
+            st.caption("Saved widths: " + ", ".join(f"{label(c)} {px}px" for c, px in widths.items() if c in order))
+    cfg = dict(column_config)
+    for c, px in widths.items():
+        if c in order:
+            base = cfg.get(c)
+            cfg[c] = {**base, "width": px} if isinstance(base, dict) else st.column_config.Column(width=px)
+    return order, cfg
 
 
 def table_editor(name, df, column_config, display_cols, table, transform=None, required=(), allow_delete=False,
@@ -253,8 +284,7 @@ def table_editor(name, df, column_config, display_cols, table, transform=None, r
         for e in msg["errors"]:
             st.error(e)
     ver = st.session_state.get(f"ver_{name}", 0)
-    shown, order = column_order(name, df, column_config)
-    arrange_columns(name, shown, order)
+    order, column_config = view_controls(name, df, column_config)
     with st.form(f"form_{name}"):
         edited = st.data_editor(df, key=f"ed_{name}_{ver}", column_config=column_config, hide_index=True, column_order=order,
                                 num_rows="dynamic" if dynamic else "fixed", disabled=list(disabled))
@@ -1144,7 +1174,8 @@ def page_log():
                 if n["source"] == "email":
                     replied_by[n["alert_id"]] = who_
             recs = [{"id": r["id"], "created": fmt(r["created_at"]), "type": r["alert_type"], "subject": r["subject"],
-                     "team_status": cases.label(r["case_status"]), "am_answer": r["response_label"] or "",
+                     "team_status": cases.label(r["case_status"]),
+                     "am_answer": (f"{r['response_label']} - {r['responded_by'] or 'name not given'}" if r["response_label"] else ""),
                      "note_for_team": r["response_note"] or "", "latest_note": last_note.get(r["id"], ""), "add_note": "",
                      "answered_by": r["responded_by"] or (f"(email reply) {replied_by[r['id']]}" if r["id"] in replied_by else ""), "answered_at": fmt(r["responded_at"]) if r["responded_at"] else "",
                      "sent": r["status"], "to": r["to_emails"], "cc": r["cc_emails"], "error": r["last_error"] or ""} for r in rows]
@@ -1165,8 +1196,9 @@ def page_log():
                    "answered_by": st.column_config.TextColumn("Answered by"), "answered_at": st.column_config.TextColumn("Answered at"),
                    "sent": st.column_config.TextColumn("Email status"), "to": st.column_config.TextColumn("To"),
                    "cc": st.column_config.TextColumn("CC"), "error": st.column_config.TextColumn("Error")}
+            order, cfg = view_controls("alertlog", df, cfg)
             with st.form("log_table_form"):
-                edited = st.data_editor(df, key=f"ed_logtbl_{ver}", column_config=cfg, hide_index=True, num_rows="fixed",
+                edited = st.data_editor(df, key=f"ed_logtbl_{ver}", column_config=cfg, hide_index=True, num_rows="fixed", column_order=order,
                                         disabled=[c for c in cols if c not in ("team_status", "add_note")])
                 who_t = st.text_input("Your name (saved with your changes)", key="log_who_table")
                 go_t = st.form_submit_button("💾 Save status / notes")

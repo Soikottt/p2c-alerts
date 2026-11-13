@@ -156,6 +156,28 @@ def live_sync(hours=None):
         raise
 
 
+def refresh_one_day(now=None):
+    """Ringba keeps changing a call after it ended (conversion, payout, revenue, duplicate / blocked flags). live_sync only
+    re-reads the last few hours, so older calls would keep their first, incomplete values. Every run therefore re-reads ONE
+    24-hour window, moving one window further back each time (last 24 h, the 24 h before, ...), and starts over after `refresh_days` (default 35) days.
+    Missing calls found this way are saved as 'backfill' (they never alert). Returns stats + which window."""
+    now = now or db.now_utc()
+    days = max(int(float(db.get_setting("refresh_days", "35") or 0)), 0)
+    if days <= 0:
+        return None
+    k = int(float(db.get_setting("refresh_cursor", "0") or 0))
+    if k < 0 or k >= days:
+        k = 0
+    start, end = now - timedelta(hours=24 * (k + 1)), now - timedelta(hours=24 * k)      # k=0: the last 24 h, k=1: the 24 h before ...
+    records, report = rc.fetch_range(start, end)
+    _check(records, report)
+    stats = upsert_calls(records, source="backfill")
+    db.set_setting("refresh_cursor", k + 1 if k + 1 < days else 0)
+    stats["window"] = f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M} UTC"
+    stats["day_back"] = k
+    return stats
+
+
 def backfill_range(start, end, progress=None, source="backfill", step_hours=24):
     """Load history day-by-day. Safe to run again: existing calls are just updated. Never sends alerts."""
     run_id = _start_run("backfill", start, end)

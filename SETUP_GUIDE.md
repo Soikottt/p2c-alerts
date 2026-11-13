@@ -393,3 +393,14 @@ You can leave GitHub's own schedule in `engine.yml` as a backup: two starts at t
 `database: 1378 queries, 12.3s spent waiting for it (average 9 ms each)` and `done in 41.0s`. If the average is above about 100 ms, your database is far away from the GitHub computers
 (Neon project region): the engine then spends its time waiting for the network. The best Neon region for GitHub is AWS **US East** (N. Virginia or Ohio).
 A run also creates at most 40 new alerts, and the log says when it stops early; the rest follows on the next runs.
+
+### Numbers that do not match Ringba (connected / paid / converted / revenue lower in the tool)
+
+Ringba keeps changing a call after it ended (conversion, payout, revenue, duplicate / blocked flags). The 5-minute run only re-reads the last 6 hours,
+so older calls kept their first, incomplete values. Now **every run also re-reads one past 24-hour window** (the last 24 h, then the 24 h before, ... up to 35 days back,
+then it starts over), so after about 3 hours of runs the whole last 35 days are refreshed; later changes are picked up the same way.
+Settings keys: `refresh_days` (35; 0 = off). To heal the last month immediately, run the **Backfill** (Reports / Settings page or the Backfill workflow) for the last 35 days once.
+Compare again after that. If numbers still differ, send one publisher's call-level CSV from Ringba and the tool's export for the same calls.
+
+### Tables: column order and width
+Every table has **Arrange columns / column width**: move a column to any position and set its width in pixels. Both are saved per table.

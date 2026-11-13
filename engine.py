@@ -100,6 +100,19 @@ def run_once(log=_emit, time_limit=None):
     finally:
         rc.set_deadline(None)
 
+    # ---- 1b. re-read one past day from Ringba, so late conversions / payouts / flags are picked up (optional)
+    if elapsed() < limit - 150:
+        step("refreshing one past day from Ringba (late conversions, payouts)")
+        rc.set_deadline(50)
+        try:
+            r = ingest.refresh_one_day(now)
+            if r:
+                say(f"refreshed day -{r['day_back']} back ({r['window']}): {r['fetched']} calls read, {r['updated']} updated, {r['inserted']} new")
+        except Exception as e:
+            say(f"day refresh FAILED (will retry): {e}")
+        finally:
+            rc.set_deadline(None)
+
     # ---- 2. DID list (optional)
     if elapsed() < limit - 90:
         step("refreshing the DID list from Ringba (once an hour)")

@@ -36,6 +36,8 @@ SETTING_DEFAULTS = {
     "targets_next_run": "",        # (internal)
     "targets_last_ok": "",         # (internal)
     "targets_last_error": "",      # (internal)
+    "refresh_days": "35",          # past days that are re-read from Ringba (one 24 h window per run) so late conversions / payouts are picked up; 0 = off
+    "refresh_cursor": "0",         # (internal) which past day is next
     "backup_email_days": "7",      # email a backup (CSV zip) to the admin every N days. 0 = never
     "backup_next_run": "",         # (internal)
 }
