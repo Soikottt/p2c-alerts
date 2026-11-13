@@ -41,6 +41,10 @@ SETTING_DEFAULTS = {
 }
 
 
+PRE_PING = True          # the app keeps this on; the short-lived engine turns it off (saves one round trip per query, the retry in _run covers dead connections)
+MEMO_TTL = 0             # seconds; the engine sets it so rules / templates are not re-read for every single alert (0 = off)
+STATS = {"queries": 0, "seconds": 0.0}
+_memo = {}
 STATEMENT_TIMEOUT_MS = 30000     # no single query may run longer than 30 s
 _IS_PG = False
 
@@ -50,7 +54,7 @@ def get_engine():
     if _engine is None:
         if not config.DB_URL:
             raise RuntimeError("DATABASE_URL is missing. Add it to your Secrets (or .env file).")
-        kwargs = {"pool_pre_ping": True, "pool_recycle": 240}
+        kwargs = {"pool_pre_ping": PRE_PING, "pool_recycle": 240}
         _IS_PG = str(config.DB_URL).startswith("postgresql")
         if _IS_PG:
             # Neon puts idle databases to sleep and silently drops idle connections. A dead connection then looks alive
@@ -84,18 +88,41 @@ def _is_connection_problem(e):
     return any(h in msg for h in _DEAD_CONNECTION_HINTS)
 
 
+def memo(key, fn):
+    """Remember fn()'s answer for MEMO_TTL seconds (only when the engine switched it on)."""
+    if not MEMO_TTL:
+        return fn()
+    hit = _memo.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < MEMO_TTL:
+        return hit[1]
+    v = fn()
+    _memo[key] = (now, v)
+    return v
+
+
+def stats_text():
+    n, sec = STATS["queries"], STATS["seconds"]
+    return f"database: {n} queries, {sec:.1f}s spent waiting for it" + (f" (average {sec / n * 1000:.0f} ms each)" if n else "")
+
+
 def _run(fn):
     """Run fn(connection) in one transaction. If the connection turns out to be dead, throw the pool away and retry
     (twice) instead of hanging or failing the whole 5-minute run on one bad connection."""
     last = None
     for attempt in range(3):
+        t_q = time.monotonic()
+        STATS["queries"] += 1
         try:
             eng = get_engine()
             with eng.begin() as c:
                 if _IS_PG:
                     c.exec_driver_sql(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")   # works through Neon's pooler too
-                return fn(c)
+                out = fn(c)
+                STATS["seconds"] += time.monotonic() - t_q
+                return out
         except Exception as e:
+            STATS["seconds"] += time.monotonic() - t_q
             if attempt < 2 and _is_connection_problem(e):
                 last = e
                 try:

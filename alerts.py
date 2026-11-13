@@ -18,7 +18,23 @@ def parse_emails(s):
 
 
 def get_rule(alert_type):
-    return db.q1("SELECT * FROM alert_rules WHERE alert_type=:t", t=alert_type)
+    return db.memo(("rule", alert_type), lambda: db.q1("SELECT * FROM alert_rules WHERE alert_type=:t", t=alert_type))
+
+
+# A run must never spend minutes creating a flood of alerts (for example right after the test alerts were deleted):
+# at most `max_new` per run and `seconds` of time. What is left is simply created by the next run.
+_budget = {"max": None, "created": 0, "deadline": None}
+
+
+def set_budget(max_new=None, seconds=None):
+    import time
+    _budget.update(max=max_new, created=0, deadline=(time.monotonic() + seconds) if seconds else None)
+
+
+def over_budget():
+    import time
+    return bool((_budget["max"] is not None and _budget["created"] >= _budget["max"])
+                or (_budget["deadline"] and time.monotonic() > _budget["deadline"]))
 
 
 def rule_enabled(alert_type):
@@ -36,6 +52,10 @@ def is_snoozed(key):
 
 
 def _entity_cc(rule, entity_type, entity_id):
+    return db.memo(("cc", rule["alert_type"], entity_type, entity_id), lambda: _entity_cc_uncached(rule, entity_type, entity_id))
+
+
+def _entity_cc_uncached(rule, entity_type, entity_id):
     cc = []
     if entity_type == "publisher":
         if rule["cc_manager"]:
@@ -93,6 +113,8 @@ def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=N
     rule = get_rule(alert_type)
     if not rule or not rule["enabled"]:
         return False
+    if status == "pending" and over_budget():
+        return False                                   # not recorded: the next run creates it
     if snooze_key and is_snoozed(snooze_key):
         return False
     body_html = None
@@ -117,6 +139,7 @@ def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=N
     full_subject = f"{prefix} {subject}".strip() + f" [#A{alert_id}]"     # replies keep this tag, so they can be matched
     text, html = (actions.attach(alert_id, alert_type, body, body_html) if status == "pending" else (body, body_html))
     db.x("UPDATE alerts SET subject=:s, body=:b, body_html=:h WHERE id=:i", s=full_subject, b=text, h=html, i=alert_id)
+    _budget["created"] += 1
     return True
 
 

@@ -303,10 +303,21 @@ def rule_inactive_dids(now):
     return made
 
 
-def run_all(now=None):
+def run_all(now=None, log=None, max_new=None, seconds=None):
+    """Every rule once. `max_new` / `seconds` limit how many alerts one run may create (the rest comes next run)."""
+    import time
     now = now or db.now_utc()
     out = {}
-    for name, fn in [("publishers", rule_new_and_lapsed_publisher), ("watchlist", rule_watchlist_buyer),
-                     ("caps", rule_caps), ("targets", rule_target_caps), ("dids", rule_inactive_dids)]:
-        out[name] = fn(now)
+    alerts.set_budget(max_new, seconds)
+    try:
+        for name, fn in [("publishers", rule_new_and_lapsed_publisher), ("watchlist", rule_watchlist_buyer),
+                         ("caps", rule_caps), ("targets", rule_target_caps), ("dids", rule_inactive_dids)]:
+            t0 = time.monotonic()
+            out[name] = fn(now)
+            if log:
+                log(f"  rule {name}: {out[name]} new alert(s), {time.monotonic() - t0:.1f}s")
+        if alerts.over_budget() and log:
+            log("  (limit for one run reached: the remaining alerts are created on the next runs)")
+    finally:
+        alerts.set_budget(None, None)
     return out

@@ -80,3 +80,26 @@ def one_line(note, tzfmt=None):
     when = tzfmt(note["when"], False)[:10] if tzfmt and note.get("when") else ""
     who = note.get("author") or "AM"
     return f"{note['text']} ({who}{', ' + when if when else ''})"
+
+
+def backfill_email_authors():
+    """Notes saved from e-mail replies before the sender's address was stored only have a name. The n-th saved reply of an
+    alert belongs to the n-th e-mail note of that alert, so the address is added to those notes. Returns how many were fixed."""
+    todo = db.q("SELECT DISTINCT alert_id FROM alert_notes WHERE source='email' AND (author IS NULL OR author NOT LIKE '%@%')")
+    if not todo:
+        return 0
+    ids = [r["alert_id"] for r in todo]
+    mails = {}
+    for m in db.q_in("SELECT alert_id, from_email FROM inbound_emails WHERE outcome='saved' AND alert_id IN :a ORDER BY received_at", "a", ids):
+        mails.setdefault(m["alert_id"], []).append(m["from_email"])
+    notes = {}
+    for n in db.q_in("SELECT id, alert_id, author FROM alert_notes WHERE source='email' AND alert_id IN :a ORDER BY id", "a", ids):
+        notes.setdefault(n["alert_id"], []).append(n)
+    fixed = 0
+    for aid, lst in notes.items():
+        for note, addr in zip(lst, mails.get(aid, [])):
+            if addr and "@" not in (note["author"] or ""):
+                who = f"{note['author']} <{addr}>" if note["author"] else addr
+                db.x("UPDATE alert_notes SET author=:w WHERE id=:i", w=who, i=note["id"])
+                fixed += 1
+    return fixed

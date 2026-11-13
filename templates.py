@@ -242,9 +242,10 @@ def render(text, ctx):
 def get_template(alert_type, rule=None):
     """(subject, body) from the template chosen for this alert, else the first saved one, else built-in."""
     tid = (rule or {}).get("template_id")
-    row = db.q1("SELECT subject, body FROM email_templates WHERE id=:i AND alert_type=:t", i=tid, t=alert_type) if tid else None
-    if row is None:
-        row = db.q1("SELECT subject, body FROM email_templates WHERE alert_type=:t ORDER BY id LIMIT 1", t=alert_type)
+    def load():
+        r = db.q1("SELECT subject, body FROM email_templates WHERE id=:i AND alert_type=:t", i=tid, t=alert_type) if tid else None
+        return r if r is not None else db.q1("SELECT subject, body FROM email_templates WHERE alert_type=:t ORDER BY id LIMIT 1", t=alert_type)
+    row = db.memo(("tpl", tid, alert_type), load)
     if row is not None:
         return row["subject"], row["body"]
     return DEFAULTS[alert_type]

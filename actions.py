@@ -19,8 +19,8 @@ def app_url():
 
 
 def defs_for(alert_type):
-    return db.q("SELECT label, effect, effect_days FROM alert_action_defs WHERE alert_type=:t AND active = TRUE "
-                "ORDER BY sort_order, id", t=alert_type)
+    return db.memo(("defs", alert_type), lambda: db.q("SELECT label, effect, effect_days FROM alert_action_defs WHERE alert_type=:t "
+                                                      "AND active = TRUE ORDER BY sort_order, id", t=alert_type))
 
 
 def plain_to_html(text):
@@ -43,13 +43,13 @@ def attach(alert_id, alert_type, body, body_html=None):
     url, defs = app_url(), defs_for(alert_type)
     if not url or not defs:
         return body, body_html
-    links = []
-    for d in defs:
+    links, values, params = [], [], {"a": alert_id, "n": db.now_utc()}
+    for i, d in enumerate(defs):                       # ONE insert for all the buttons of this email
         tok = secrets.token_urlsafe(16)
-        db.x("INSERT INTO alert_actions (token, alert_id, label, effect, effect_days, created_at) "
-             "VALUES (:t,:a,:l,:e,:d,:n)", t=tok, a=alert_id, l=d["label"], e=d["effect"] or "record",
-             d=d["effect_days"], n=db.now_utc())
+        values.append(f"(:t{i},:a,:l{i},:e{i},:d{i},:n)")
+        params.update({f"t{i}": tok, f"l{i}": d["label"], f"e{i}": d["effect"] or "record", f"d{i}": d["effect_days"]})
         links.append((d["label"], f"{url}/?a={tok}"))
+    db.x("INSERT INTO alert_actions (token, alert_id, label, effect, effect_days, created_at) VALUES " + ", ".join(values), **params)
     text = body + "\n\nPlease choose one (click a link):\n" + "\n".join(f"  * {l}: {u}" for l, u in links)
     return text, build_html(body_html or plain_to_html(body), links)
 

@@ -357,3 +357,39 @@ GitHub runs a job on a schedule only if ALL of these are true. Check them in thi
    (GitHub switches scheduled workflows off after 60 days without any commit in a public repository.)
 4. **Look at the run list.** Open the workflow and look at the "Event" of the runs: `schedule` = automatic, `workflow_dispatch` = you pressed the button.
    If the last `schedule` run is days old, it is 1, 2 or 3 above. If scheduled runs exist but are late by 10+ minutes, that is GitHub itself being slow.
+
+### Start the engine from cron-job.org every 5 minutes (reliable, free)
+
+GitHub's own schedule is "best effort" and often late or skipped. cron-job.org calls GitHub on time instead and tells GitHub "run the engine now".
+
+**A. Make a GitHub token (once)**
+1. GitHub -> your profile picture -> **Settings** -> (bottom of the left menu) **Developer settings** -> **Personal access tokens** -> **Fine-grained tokens** -> **Generate new token**.
+2. Token name: `cron-job engine`. Expiration: the longest allowed (write the date in your calendar, the engine stops when the token expires).
+3. **Repository access** -> *Only select repositories* -> pick your p2c repository.
+4. **Permissions** -> *Repository permissions* -> **Actions: Read and write** (leave the rest as it is).
+5. **Generate token** and copy it now (it starts with `github_pat_`). GitHub shows it only once. Never paste it in a chat or a file in the repository.
+
+**B. Make the job on cron-job.org (once)**
+1. Create a free account at cron-job.org and confirm your email. -> **Cronjobs** -> **Create cronjob**.
+2. Title: `P2C engine`. URL (replace OWNER and REPO with your GitHub user name and repository name):
+   `https://api.github.com/repos/OWNER/REPO/actions/workflows/engine.yml/dispatches`
+3. Execution schedule: **Every 5 minutes**.
+4. Open the **Advanced** tab:
+   * Request method: **POST**
+   * Request body: `{"ref":"main"}`   (use `master` if that is your default branch name)
+   * Headers (add one row each):
+     `Authorization` = `Bearer github_pat_xxxxxxxx` (your token)
+     `Accept` = `application/vnd.github+json`
+     `X-GitHub-Api-Version` = `2022-11-28`
+     `Content-Type` = `application/json`
+5. Turn on **Notify me when the execution fails**. **Save**, then press **Test run**.
+6. A good answer is **HTTP 204** (No Content). In GitHub -> Actions you now see a new run every 5 minutes with the event `workflow_dispatch`.
+
+**If the test run is not 204:** 401 = token wrong or expired. 403 or 404 = wrong OWNER/REPO, wrong file name (must be `engine.yml`), or the token has no access to this repository / no *Actions: Read and write*. 422 = wrong branch name in the body.
+
+You can leave GitHub's own schedule in `engine.yml` as a backup: two starts at the same moment never run at the same time (the workflow waits its turn).
+
+### The engine log now ends with two lines
+`database: 1378 queries, 12.3s spent waiting for it (average 9 ms each)` and `done in 41.0s`. If the average is above about 100 ms, your database is far away from the GitHub computers
+(Neon project region): the engine then spends its time waiting for the network. The best Neon region for GitHub is AWS **US East** (N. Virginia or Ohio).
+A run also creates at most 40 new alerts, and the log says when it stops early; the rest follows on the next runs.

@@ -11,6 +11,7 @@ import traceback
 from datetime import timedelta
 
 import alerts
+import cases
 import backup
 import db
 import dids
@@ -158,13 +159,19 @@ def run_once(log=_emit, time_limit=None):
                 say(f"email replies: {r['saved']} saved as notes ({r['checked']} new messages checked)")
         except Exception as e:
             say(f"reading email replies FAILED: {e}")
+        try:
+            fixed = cases.backfill_email_authors()          # old notes: add the sender's address
+            if fixed:
+                say(f"added the sender's email address to {fixed} older reply note(s)")
+        except Exception as e:
+            say(f"could not add sender addresses to older notes: {e}")
     else:
         say("email replies: skipped (this run is short of time)")
 
     # ---- 4. rules (essential)
     step("checking the alert rules")
     try:
-        made = rules.run_all()
+        made = rules.run_all(log=say, max_new=40, seconds=120)
         say("alerts created: " + ", ".join(f"{k}={v}" for k, v in made.items()))
     except Exception as e:
         ok = False
@@ -192,6 +199,7 @@ def run_once(log=_emit, time_limit=None):
         except Exception as e:
             say(f"backup email FAILED: {e}")
     CURRENT["step"] = "finished"
+    say(db.stats_text())
     say(f"done in {elapsed():.1f}s" + ("" if ok else " (with errors)"))
     return ok, "\n".join(lines)
 
@@ -211,6 +219,8 @@ def start_watchdog(seconds):
 
 
 def main():
+    db.PRE_PING = False          # a fresh short-lived process: no ping before every query (a dead connection is retried by db._run)
+    db.MEMO_TTL = 300            # rules / templates / buttons are read once per run, not once per alert
     wd = start_watchdog(TIME_LIMIT)
     good, _ = run_once()
     wd.cancel()

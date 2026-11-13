@@ -52,11 +52,15 @@ def action_page(token):
     st.markdown(f"Your answer: **{row['label']}**")
     with st.form("answer_form"):
         who = st.text_input("Your name", key="ans_who")
+        mail = st.text_input("Your email address", key="ans_mail", help="So the team can see exactly who answered.")
         note = st.text_area("Note for the team (optional)", key="ans_note")
         go = st.form_submit_button("✅ Confirm my answer")
     if go:
-        res = actions.respond(token, who, note)
-        (st.success if res["ok"] else st.error)(res["msg"])
+        if not who.strip() or not alerts.EMAIL_RE.match(mail.strip()):
+            st.error("Please type your name and a valid email address, then confirm again.")
+        else:
+            res = actions.respond(token, f"{who.strip()} <{mail.strip().lower()}>", note)
+            (st.success if res["ok"] else st.error)(res["msg"])
 
 
 _token = st.query_params.get("a") if hasattr(st, "query_params") else None
@@ -1133,14 +1137,16 @@ def page_log():
         if not rows:
             st.info("Nothing to show.")
         else:
-            last_note = {}
+            last_note, replied_by = {}, {}
             for n in db.q("SELECT alert_id, source, author, text FROM alert_notes ORDER BY id"):
                 who_ = n["author"] or {"answer": "AM", "email": "AM", "team": "Team"}.get(n["source"], "")
                 last_note[n["alert_id"]] = f"{n['text']}  - {who_} ({n['source']})"
+                if n["source"] == "email":
+                    replied_by[n["alert_id"]] = who_
             recs = [{"id": r["id"], "created": fmt(r["created_at"]), "type": r["alert_type"], "subject": r["subject"],
                      "team_status": cases.label(r["case_status"]), "am_answer": r["response_label"] or "",
                      "note_for_team": r["response_note"] or "", "latest_note": last_note.get(r["id"], ""), "add_note": "",
-                     "answered_by": r["responded_by"] or "", "answered_at": fmt(r["responded_at"]) if r["responded_at"] else "",
+                     "answered_by": r["responded_by"] or (f"(email reply) {replied_by[r['id']]}" if r["id"] in replied_by else ""), "answered_at": fmt(r["responded_at"]) if r["responded_at"] else "",
                      "sent": r["status"], "to": r["to_emails"], "cc": r["cc_emails"], "error": r["last_error"] or ""} for r in rows]
             cols = ["id", "created", "type", "subject", "team_status", "am_answer", "note_for_team", "latest_note", "add_note",
                     "answered_by", "answered_at", "sent", "to", "cc", "error"]

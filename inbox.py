@@ -111,7 +111,8 @@ def sync_replies(days=14, scan=300, max_seconds=45):
                 allowed = {e.lower() for e in alerts.parse_emails(a["to_emails"]) + alerts.parse_emails(a["cc_emails"])} if a else set()
                 text = clean_reply(_text_of(msg))
                 if a and addr in allowed and text:
-                    who = str(make_header(decode_header(name))) if name else addr
+                    shown = str(make_header(decode_header(name))).strip() if name else ""
+                    who = f"{shown} <{addr}>" if shown and shown.lower() != addr else addr      # name AND e-mail address of the sender
                     cases.add_note(aid, "email", who, text, cases.mark_follow_up_if_open(aid))
                     alerts.create_alert("alert_response", f"resp-mail:{aid}:{hashlib.sha1(mid.encode()).hexdigest()[:10]}",
                                         {"responder": who, "choice": "Replied by email", "note": text[:400],
