@@ -2,7 +2,8 @@ name: Alert engine (every 5 minutes)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    # every 5 minutes, but NOT on :00 / :05 / :10 ... : GitHub is busiest on those minutes and silently skips scheduled runs then
+    - cron: "2-59/5 * * * *"
   workflow_dispatch:
 
 concurrency:
