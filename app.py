@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import json
 import pandas as pd
 import streamlit as st
 
@@ -208,6 +209,36 @@ def save_table(table, orig, edited, display_cols, pk="id", transform=None, requi
     return done
 
 
+def column_order(name, df, column_config):
+    """(shown columns, saved order). The order is saved per table in the settings, so it stays after you close the app."""
+    shown = [c for c in df.columns if column_config.get(c, True) is not None and not str(c).startswith("_")]
+    try:
+        saved = json.loads(db.get_setting(f"colorder_{name}") or "[]")
+    except ValueError:
+        saved = []
+    return shown, [c for c in saved if c in shown] + [c for c in shown if c not in saved]
+
+
+def arrange_columns(name, shown, order):
+    """Move a column to any position. (Streamlit tables cannot remember a drag, so this is the saved way to do it.)"""
+    with st.expander("↔️ Arrange columns"):
+        label = lambda c: str(c).replace("_", " ")
+        c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
+        col = c1.selectbox("Column", order, format_func=label, key=f"mv_col_{name}")
+        pos = c2.number_input("Move to position (1 = first)", 1, len(order), min(order.index(col) + 1, len(order)),
+                              key=f"mv_pos_{name}_{col}")
+        c3.write(""); c4.write("")
+        if c3.button("Move", key=f"mv_go_{name}"):
+            new = [c for c in order if c != col]
+            new.insert(int(pos) - 1, col)
+            db.set_setting(f"colorder_{name}", json.dumps(new))
+            st.rerun()
+        if c4.button("Reset", key=f"mv_reset_{name}"):
+            db.set_setting(f"colorder_{name}", "[]")
+            st.rerun()
+        st.caption("Now: " + "  ›  ".join(label(c) for c in order))
+
+
 def table_editor(name, df, column_config, display_cols, table, transform=None, required=(), allow_delete=False,
                  dynamic=True, disabled=(), pk="id", insert_extra=None):
     """An editable table inside a form: nothing is sent or reloaded until you press Save."""
@@ -218,8 +249,10 @@ def table_editor(name, df, column_config, display_cols, table, transform=None, r
         for e in msg["errors"]:
             st.error(e)
     ver = st.session_state.get(f"ver_{name}", 0)
+    shown, order = column_order(name, df, column_config)
+    arrange_columns(name, shown, order)
     with st.form(f"form_{name}"):
-        edited = st.data_editor(df, key=f"ed_{name}_{ver}", column_config=column_config, hide_index=True,
+        edited = st.data_editor(df, key=f"ed_{name}_{ver}", column_config=column_config, hide_index=True, column_order=order,
                                 num_rows="dynamic" if dynamic else "fixed", disabled=list(disabled))
         submitted = st.form_submit_button("💾 Save changes")
     if submitted:

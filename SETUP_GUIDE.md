@@ -341,3 +341,19 @@ If anything is unclear, send me a screenshot of the message and the step number.
 * **Buyer target caps are automatic.** The engine reads every target's daily and monthly cap from Ringba (`GET /targets`, the `schedule` object) and its live usage (`GET /targets/{id}/Counts`: `currentDay`, `currentMonth`). Alerts at the % levels you choose (default 80,100) for BOTH the daily and the monthly cap. See Caps -> "Buyer target caps". Targets are re-read every hour (Settings key `targets_sync_minutes`), usage on every 5-minute run. Usage older than 30 minutes is never used for an alert.
 * **Publisher caps are per campaign.** Ringba has no cap data for publishers, so they are typed in. Pick the Campaign on each row (one row per campaign); usage is counted from your own calls for that publisher + campaign.
 * The first engine run after the update creates the new `targets` table and the `campaigns` column by itself.
+
+### The 5-minute run does not start by itself - checklist
+
+GitHub runs a job on a schedule only if ALL of these are true. Check them in this order:
+
+1. **Free minutes left?** GitHub -> your profile picture -> Settings -> Billing and plans -> *Usage this month* -> Actions.
+   A PRIVATE repository on the free plan gets only **2,000 minutes a month**. A run every 5 minutes is about 8,600 minutes a month
+   (every run is billed as at least 1 minute), so the minutes are used up after about 7 days and GitHub then stops the runs.
+   Fixes: make the repository **public** (Actions are free and unlimited there; your passwords stay safe in *Secrets*, never in the code),
+   or pay for minutes, or run the engine every 30 minutes (change `2-59/5` to `2,32` in `engine.yml`), or run `engine.py` on another computer/server.
+2. **Workflow file in the right place?** It must be at `.github/workflows/engine.yml` in the repository's **default branch** (usually `main`).
+   The copy in `workflows_to_paste/` does nothing by itself.
+3. **Workflow enabled?** Actions tab -> *Alert engine (every 5 minutes)*. A yellow banner "This scheduled workflow is disabled" -> press *Enable workflow*.
+   (GitHub switches scheduled workflows off after 60 days without any commit in a public repository.)
+4. **Look at the run list.** Open the workflow and look at the "Event" of the runs: `schedule` = automatic, `workflow_dispatch` = you pressed the button.
+   If the last `schedule` run is days old, it is 1, 2 or 3 above. If scheduled runs exist but are late by 10+ minutes, that is GitHub itself being slow.
