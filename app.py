@@ -87,6 +87,9 @@ def schema_ready():
         db.q1("SELECT subject FROM email_templates LIMIT 1")
         db.q1("SELECT token FROM alert_actions LIMIT 1")
         db.q1("SELECT entity_key FROM snoozes LIMIT 1")
+        db.q1("SELECT never_alert FROM dids LIMIT 1")
+        db.q1("SELECT campaign_name FROM caps LIMIT 1")
+        db.q1("SELECT ringba_target_id FROM targets LIMIT 1")
         return True
     except Exception:
         return False
@@ -302,6 +305,16 @@ def page_dashboard():
             u = rules.cap_usage(c, now)
             out.append({"Type": c["entity_type"], "Name": u["name"], "Period": c["period"], "Counts": c["metric"],
                         "Used": u["usage"], "Cap": c["cap_value"], "Percent": round(u["pct"], 1)})
+        st.dataframe(pd.DataFrame(out).sort_values("Percent", ascending=False), hide_index=True)
+    tg_rows = db.q("SELECT * FROM targets WHERE active = TRUE AND (daily_cap IS NOT NULL OR monthly_cap IS NOT NULL) AND counts_at IS NOT NULL")
+    if tg_rows:
+        st.subheader("Buyer target caps right now (from Ringba)")
+        out = []
+        for t in tg_rows:
+            for per, cap, used in (("daily", t["daily_cap"], t["count_day"]), ("monthly", t["monthly_cap"], t["count_month"])):
+                if cap:
+                    out.append({"Buyer": t["buyer_name"] or "", "Target": t["name"], "Period": per, "Used": used or 0, "Cap": cap,
+                                "Percent": round((used or 0) / cap * 100, 1)})
         st.dataframe(pd.DataFrame(out).sort_values("Percent", ascending=False), hide_index=True)
 
     st.subheader("Latest alerts")
@@ -587,7 +600,7 @@ def page_dids():
     now = db.now_utc()
     pubn = {p["id"]: p["name"] for p in db.q("SELECT id, name FROM publishers")}
     rows = db.q("""SELECT d.id, d.number, d.label, d.status, d.monthly_cost, d.notes, d.added_at, d.last_call_at,
-                          d.publisher_id, d.affiliate_name, d.next_charge_at, d.campaign_id
+                          d.publisher_id, d.affiliate_name, d.next_charge_at, d.campaign_id, d.never_alert
                    FROM dids d""")
     camp = didtools.campaign_names(rows)
     calls30 = didtools.calls_last_30d(now)
@@ -605,20 +618,21 @@ def page_dids():
                      "calls_30d": calls30.get(r["id"], 0),
                      "follow_up": cases.one_line(am_notes.get(r["id"]), fmt),
                      "case": cases.label(case_state[r["id"]]) if r["id"] in case_state else "",
-                     "status": r["status"], "label": r["label"],
+                     "status": r["status"], "never_alert": bool(r["never_alert"]), "label": r["label"],
                      "monthly_cost": float(r["monthly_cost"]) if r["monthly_cost"] is not None else None, "notes": r["notes"],
                      "idle_days": (now - ref).days if ref else None,
                      "_retired": 1 if r["status"] == "retired" else 0})
     cols = ["id", "campaign", "publisher", "created_added", "next_charge", "number", "last_call", "calls_30d", "follow_up",
-            "case", "status", "label", "monthly_cost", "notes", "idle_days"]
+            "case", "status", "never_alert", "label", "monthly_cost", "notes", "idle_days"]
     df = frame(recs, cols + ["_retired"])
+    df["never_alert"] = df["never_alert"].fillna(False).astype(bool)
     df = df.sort_values(["_retired", "idle_days"], ascending=[True, False], na_position="last").drop(columns="_retired").reset_index(drop=True)
 
     def tf(v):
         num = rc.normalize_phone(v["number"])
         if not num:
             raise ValueError("number is not valid")
-        return {"number": num, "label": v["label"], "status": v["status"] or "active",
+        return {"number": num, "label": v["label"], "status": v["status"] or "active", "never_alert": bool(v["never_alert"]),
                 "monthly_cost": v["monthly_cost"], "notes": v["notes"]}
 
     cfg = {"id": None,
@@ -633,11 +647,14 @@ def page_dids():
                                                     help="The latest answer or email reply from the affiliate manager. Full history: 'History of a DID' below."),
            "case": st.column_config.TextColumn("Case", help="Open / Follow-up / Done, for the newest inactive-DID alert."),
            "status": st.column_config.SelectboxColumn("Status", options=["active", "retired"]),
+           "never_alert": st.column_config.CheckboxColumn("Never alert", help="Tick = this DID NEVER gets any alert (no inactive-DID emails, "
+                                                          "and its calls do not trigger new-publisher / returning-publisher / watchlist emails). "
+                                                          "Use it for DIDs you keep on purpose. It stays ticked through every Ringba sync."),
            "label": st.column_config.TextColumn("Label"),
            "monthly_cost": st.column_config.NumberColumn("Monthly cost $", min_value=0.0, format="%.2f"),
            "notes": st.column_config.TextColumn("Team notes"),
            "idle_days": st.column_config.NumberColumn("Days without calls")}
-    table_editor("did", df, cfg, ["number", "label", "status", "monthly_cost", "notes"], "dids", tf, required=("number",),
+    table_editor("did", df, cfg, ["number", "label", "status", "never_alert", "monthly_cost", "notes"], "dids", tf, required=("number",),
                  disabled=["campaign", "publisher", "created_added", "next_charge", "last_call", "calls_30d", "follow_up", "case", "idle_days"],
                  insert_extra={"added_at": db.now_utc()})
 
@@ -709,18 +726,27 @@ def page_dids():
 # ================================================================== CAPS
 def caps_section(entity_type, default_metric):
     table = "publishers" if entity_type == "publisher" else "buyers"
+    by_campaign = entity_type == "publisher"
     ents = db.q(f"SELECT id, name FROM {table} ORDER BY name")
     name2id = {e["name"]: e["id"] for e in ents}
-    rows = db.q(f"""SELECT c.id, c.entity_id, e.name AS name, c.period, c.metric, c.cap_value, c.thresholds, c.active, c.notes
-                    FROM caps c JOIN {table} e ON e.id = c.entity_id WHERE c.entity_type = :t ORDER BY e.name""", t=entity_type)
+    ALL = "(all campaigns)"
+    campaigns = [ALL] + [r["campaign_name"] for r in db.q(
+        "SELECT DISTINCT campaign_name FROM calls WHERE campaign_name IS NOT NULL AND call_at >= :s ORDER BY campaign_name",
+        s=db.now_utc() - timedelta(days=120))]
+    rows = db.q(f"""SELECT c.id, c.entity_id, e.name AS name, c.campaign_name, c.period, c.metric, c.cap_value, c.thresholds, c.active, c.notes
+                    FROM caps c JOIN {table} e ON e.id = c.entity_id WHERE c.entity_type = :t ORDER BY e.name, c.campaign_name""", t=entity_type)
     now = db.now_utc()
     for r in rows:
         u = rules.cap_usage({"entity_type": entity_type, "entity_id": r["entity_id"], "period": r["period"],
-                             "metric": r["metric"], "cap_value": r["cap_value"]}, now)
+                             "metric": r["metric"], "cap_value": r["cap_value"], "campaign_name": r["campaign_name"]}, now)
         r["used_now"], r["percent_now"] = u["usage"], round(u["pct"], 1)
-    cols = ["id", "name", "period", "metric", "cap_value", "thresholds", "active", "notes", "used_now", "percent_now"]
+        r["campaign"] = r["campaign_name"] or ALL
+        if r["campaign_name"] and r["campaign_name"] not in campaigns:
+            campaigns.append(r["campaign_name"])           # a campaign with no recent calls must stay selectable
+    cols = ["id", "name"] + (["campaign"] if by_campaign else []) + ["period", "metric", "cap_value", "thresholds", "active", "notes", "used_now", "percent_now"]
     df = frame(rows, cols)
     df["active"] = df["active"].fillna(True).astype(bool)
+    editable = ["name"] + (["campaign"] if by_campaign else []) + ["period", "metric", "cap_value", "thresholds", "active", "notes"]
 
     def tf(v):
         if v["name"] not in name2id:
@@ -729,12 +755,17 @@ def caps_section(entity_type, default_metric):
         if cap <= 0:
             raise ValueError("cap must be more than 0")
         th = ",".join(str(t) for t in rules.parse_thresholds(v["thresholds"] or "80,100"))
-        return {"entity_type": entity_type, "entity_id": name2id[v["name"]], "period": v["period"] or "daily",
-                "metric": v["metric"] or default_metric, "cap_value": cap, "thresholds": th,
-                "active": bool(v["active"]), "notes": v["notes"]}
+        out = {"entity_type": entity_type, "entity_id": name2id[v["name"]], "period": v["period"] or "daily",
+               "metric": v["metric"] or default_metric, "cap_value": cap, "thresholds": th,
+               "active": bool(v["active"]), "notes": v["notes"]}
+        if by_campaign:
+            out["campaign_name"] = None if (v["campaign"] in (None, ALL)) else v["campaign"]
+        return out
 
     cfg = {"id": None,
            "name": st.column_config.SelectboxColumn(entity_type.title(), options=list(name2id), required=True),
+           "campaign": st.column_config.SelectboxColumn("Campaign", options=campaigns,
+                                                        help="This cap counts only calls of this campaign. '(all campaigns)' = every campaign of the publisher."),
            "period": st.column_config.SelectboxColumn("Period", options=["daily", "monthly"], required=True),
            "metric": st.column_config.SelectboxColumn("Counts", options=["paid", "converted", "connected", "all"],
                                                       help="Which calls use up the cap"),
@@ -744,21 +775,75 @@ def caps_section(entity_type, default_metric):
            "notes": st.column_config.TextColumn("Notes"),
            "used_now": st.column_config.NumberColumn("Used now"),
            "percent_now": st.column_config.NumberColumn("% now")}
-    table_editor(f"cap_{entity_type}", df, cfg, ["name", "period", "metric", "cap_value", "thresholds", "active", "notes"],
-                 "caps", tf, required=("name", "cap_value"), allow_delete=True, disabled=["used_now", "percent_now"])
+    table_editor(f"cap_{entity_type}", df, cfg, editable, "caps", tf, required=("name", "cap_value"), allow_delete=True,
+                 disabled=["used_now", "percent_now"])
+
+
+def targets_section():
+    import targets as tg
+    st.caption("Read from Ringba by itself: every target's **daily** and **monthly** cap, and its live usage (the same counters Ringba's routing "
+               "uses). You get an email when usage reaches the levels below. Targets are re-read from Ringba every "
+               f"{int(float(db.get_setting('targets_sync_minutes') or 60))} minutes; usage on every 5-minute run.")
+    flash("flash_targets")
+    ok_t, err = db.get_setting("targets_last_ok", ""), db.get_setting("targets_last_error", "")
+    c1, c2 = st.columns([1, 3])
+    if c1.button("🔄 Read targets from Ringba now", key="tg_sync"):
+        try:
+            rc.set_deadline(120)
+            r = tg.run(force=True)
+            d, u = r["definitions"], r["usage"]
+            set_flash("flash_targets", "ok", f"Ringba has {d['in_ringba']} targets: {d['report']['with_daily_cap']} with a daily cap, "
+                      f"{d['report']['with_monthly_cap']} with a monthly cap. Usage read for {u['polled']} of {u['total']}.")
+        except Exception as e:
+            set_flash("flash_targets", "err", f"Could not read targets: {e}")
+        finally:
+            rc.set_deadline(None)
+        st.rerun()
+    c2.caption((f"Last successful read: {ago(ok_t)}. " if ok_t else "Not read yet. ") + (f"Last problem: {err}" if err else ""))
+    rows = db.q("SELECT * FROM targets WHERE active = TRUE AND (daily_cap IS NOT NULL OR monthly_cap IS NOT NULL) ORDER BY buyer_name, name")
+    if not rows:
+        st.info("No target with a cap yet. Press the button above (Ringba must have a daily or monthly cap on the target).")
+        return
+    recs = []
+    for r in rows:
+        dp = round((r["count_day"] or 0) / r["daily_cap"] * 100, 1) if r["daily_cap"] else None
+        mp = round((r["count_month"] or 0) / r["monthly_cap"] * 100, 1) if r["monthly_cap"] else None
+        recs.append({"id": r["id"], "buyer": r["buyer_name"] or "", "target": r["name"],
+                     "daily_cap": r["daily_cap"], "used_today": r["count_day"] if r["daily_cap"] else None, "today_pct": dp,
+                     "monthly_cap": r["monthly_cap"], "used_month": r["count_month"] if r["monthly_cap"] else None, "month_pct": mp,
+                     "alerts_on": bool(r["alerts_on"]), "thresholds": r["thresholds"], "usage_read": ago(r["counts_at"]) if r["counts_at"] else "never"})
+    cols = ["id", "buyer", "target", "daily_cap", "used_today", "today_pct", "monthly_cap", "used_month", "month_pct", "alerts_on", "thresholds", "usage_read"]
+    df = frame(recs, cols)
+    df["alerts_on"] = df["alerts_on"].astype(bool)
+
+    def tf(v):
+        th = ",".join(str(t) for t in rules.parse_thresholds(v["thresholds"] or "80,100"))
+        return {"alerts_on": bool(v["alerts_on"]), "thresholds": th}
+    cfg = {"id": None, "buyer": st.column_config.TextColumn("Buyer"), "target": st.column_config.TextColumn("Target"),
+           "daily_cap": st.column_config.NumberColumn("Daily cap"), "used_today": st.column_config.NumberColumn("Used today"),
+           "today_pct": st.column_config.NumberColumn("Today %"), "monthly_cap": st.column_config.NumberColumn("Monthly cap"),
+           "used_month": st.column_config.NumberColumn("Used this month"), "month_pct": st.column_config.NumberColumn("Month %"),
+           "alerts_on": st.column_config.CheckboxColumn("Send alerts", help="Untick to stop alerts for this target."),
+           "thresholds": st.column_config.TextColumn("Alert at % (comma-separated)", help="Example: 80,100. Applies to the daily and the monthly cap."),
+           "usage_read": st.column_config.TextColumn("Usage read")}
+    table_editor("targets", df, cfg, ["alerts_on", "thresholds"], "targets", tf, dynamic=False,
+                 disabled=["buyer", "target", "daily_cap", "used_today", "today_pct", "monthly_cap", "used_month", "month_pct", "usage_read"])
 
 
 def page_caps():
     start, _ = window_start("daily", db.now_utc())
-    st.caption(f"Copy your caps from Ringba here. The tool counts calls and emails you when usage reaches the % you choose. "
+    st.caption(f"The tool emails you when usage reaches the % you choose. "
                f"Today's window started {fmt(start)}. Daily caps reset at the 'Day starts at' time in Settings "
                f"(default 00:00, i.e. the day ends at 11:59 PM). Monthly caps reset on the 1st. Remove a row to delete a cap.")
-    st.subheader("🏢 Buyer caps")
-    st.caption("Default: counts PAID calls.")
-    caps_section("buyer", "paid")
-    st.subheader("🧑‍💼 Publisher caps")
-    st.caption("Default: counts CONVERTED calls.")
+    st.subheader("🎯 Buyer target caps (automatic from Ringba)")
+    targets_section()
+    st.subheader("🧑‍💼 Publisher caps (per campaign)")
+    st.caption("Ringba has no cap data for publishers, so type these in. Pick the **campaign** when the publisher has a different cap on each "
+               "campaign (one row per campaign). Usage is counted from your own call data. Default: counts CONVERTED calls.")
     caps_section("publisher", "converted")
+    st.subheader("🏢 Buyer caps (manual, whole buyer)")
+    st.caption("Only for a cap on the buyer as a whole. For caps on a buyer's targets use the automatic section above. Default: counts PAID calls.")
+    caps_section("buyer", "paid")
 
 
 # ================================================================== EMAILS
@@ -1093,19 +1178,51 @@ def page_log():
                         set_flash("flash_log", "ok", "Saved.")
                     st.rerun()
 
+    log_cleanup()
+
     st.subheader("Paused (snoozed) alerts")
     sn = [r for r in db.q("SELECT entity_key, snooze_until, reason FROM snoozes") if db.to_dt(r["snooze_until"]) > db.now_utc()]
     if not sn:
         st.caption("Nothing is paused.")
     else:
+        pubn = {p["id"]: p["name"] for p in db.q("SELECT id, name FROM publishers")}
+        buyn = {b["id"]: b["name"] for b in db.q("SELECT id, name FROM buyers")}
+        did_ids = [int(r["entity_key"].split(":")[1]) for r in sn if r["entity_key"].startswith("did:")]
+        did_rows = {d["id"]: d for d in db.q_in("SELECT id, number, publisher_id, affiliate_name, campaign_id FROM dids WHERE id IN :i", "i", did_ids)} if did_ids else {}
+        camp = didtools.campaign_names(list(did_rows.values())) if did_rows else {}
+        caps_by_id = {c["id"]: c for c in db.q("SELECT id, entity_type, entity_id, campaign_name FROM caps")}
+        tgt_by_id = {t["id"]: t for t in db.q("SELECT id, name FROM targets")}
+        seen_labels = {}
         for r in sn:
-            if r["entity_key"].startswith("did:"):
-                d = db.q1("SELECT number FROM dids WHERE id=:i", i=int(r["entity_key"].split(":")[1]))
-                r["what"] = f"DID {d['number']}" if d else r["entity_key"]
+            kind, _, ident = r["entity_key"].partition(":")
+            r["campaign"], r["publisher"] = "", ""
+            if kind == "did" and ident.isdigit() and int(ident) in did_rows:
+                d = did_rows[int(ident)]
+                r["what"] = f"DID {d['number']}"
+                r["campaign"] = camp.get(d["id"], "")
+                r["publisher"] = pubn.get(d["publisher_id"]) or d["affiliate_name"] or ""
+            elif kind == "cap" and ident.isdigit() and int(ident) in caps_by_id:
+                c = caps_by_id[int(ident)]
+                if c["entity_type"] == "publisher":
+                    r["publisher"] = pubn.get(c["entity_id"], "")
+                    r["campaign"] = c["campaign_name"] or ""
+                    r["what"] = f"Publisher cap: {r['publisher']}" + (f" / {c['campaign_name']}" if c["campaign_name"] else "")
+                else:
+                    r["what"] = f"Buyer cap: {buyn.get(c['entity_id'], '?')}"
+            elif kind == "target":
+                tid, _, per = ident.partition(":")
+                trow = tgt_by_id.get(int(tid)) if tid.isdigit() else None
+                r["what"] = f"Target cap ({per}): {trow['name']}" if trow else r["entity_key"]
+                r["campaign"] = ""
+                r["publisher"] = ""
             else:
                 r["what"] = r["entity_key"]
+            n = seen_labels[r["what"]] = seen_labels.get(r["what"], 0) + 1
+            if n > 1:
+                r["what"] = f"{r['what']} ({n})"
             r["until"] = fmt(r["snooze_until"])
-        st.dataframe(pd.DataFrame(sn)[["what", "until", "reason"]], hide_index=True)
+        st.dataframe(pd.DataFrame(sn).rename(columns={"what": "paused", "campaign": "campaign name", "publisher": "publisher name"})
+                     [["paused", "campaign name", "publisher name", "until", "reason"]], hide_index=True)
         with st.form("unsnooze_form"):
             pick = st.multiselect("Resume alerts for", [r["what"] for r in sn], key="unsnooze_pick")
             go = st.form_submit_button("Resume now")
@@ -1115,6 +1232,44 @@ def page_log():
                     db.x("DELETE FROM snoozes WHERE entity_key=:k", k=r["entity_key"])
             set_flash("flash_log", "ok", f"Resumed {len(pick)}.")
             st.rerun()
+
+
+def log_cleanup():
+    """Delete test alerts. An alert that already exists blocks a new one for the same DID / cap, so test alerts must go
+    before you launch for real."""
+    with st.expander("🗑️ Delete test alerts (do this before you go live)"):
+        st.caption("A DID that already has an alert (even a test one, even in DRY RUN) will NOT get a new alert for the same idle period. "
+                   "Delete the test alerts here and the engine creates fresh, real ones on its next run (25 emails go out per run).")
+        flash("flash_cleanup")
+        also = st.checkbox("Also resume paused (snoozed) DIDs / caps that belong to the deleted alerts", value=True, key="clean_resume")
+        recent = db.q("SELECT id, created_at, alert_type, subject, status FROM alerts ORDER BY id DESC LIMIT 300")
+        labels = {f"#{r['id']} · {fmt(r['created_at'])} · {r['status']} · {r['subject']}"[:160]: r["id"] for r in recent}
+        with st.form("clean_pick_form"):
+            pick = st.multiselect("1. Pick the alerts to delete", list(labels), key="clean_pick")
+            go1 = st.form_submit_button("🗑️ Delete the picked alerts")
+        if go1:
+            n = alerts.delete_alerts([labels[k] for k in pick], also) if pick else 0
+            set_flash("flash_cleanup", "ok", f"Deleted {n} alert(s).")
+            st.rerun()
+        n_dry = db.q1("SELECT COUNT(*) AS n FROM alerts WHERE status='dry_run'")["n"]
+        if st.button(f"2. Delete all {n_dry} DRY-RUN alerts (never sent)", disabled=not n_dry, key="clean_dry"):
+            ids = [r["id"] for r in db.q("SELECT id FROM alerts WHERE status='dry_run'")]
+            set_flash("flash_cleanup", "ok", f"Deleted {alerts.delete_alerts(ids, also)} dry-run alert(s).")
+            st.rerun()
+        types = [r["alert_type"] for r in db.q("SELECT DISTINCT alert_type FROM alerts ORDER BY alert_type")]
+        with st.form("clean_all_form"):
+            t = st.selectbox("3. Start fresh: delete ALL alerts of this type", ["(all types)"] + types, key="clean_type")
+            word = st.text_input("Type DELETE to confirm", key="clean_word")
+            go3 = st.form_submit_button("🧨 Delete them")
+        if go3:
+            if word.strip() != "DELETE":
+                set_flash("flash_cleanup", "err", "Nothing deleted: type DELETE (capital letters) to confirm.")
+            else:
+                rows = db.q("SELECT id FROM alerts") if t == "(all types)" else db.q("SELECT id FROM alerts WHERE alert_type=:t", t=t)
+                set_flash("flash_cleanup", "ok", f"Deleted {alerts.delete_alerts([r['id'] for r in rows], also)} alert(s).")
+            st.rerun()
+        if mailer.is_dry_run():
+            st.info("DRY RUN is still ON. When you are ready, untick it in ⚙️ Settings ('Send REAL emails').")
 
 
 # ================================================================== SYNC & IMPORT
@@ -1175,6 +1330,10 @@ def page_settings():
                               help="Reads the mailbox the alerts are sent from (IMAP must be on). Replies are saved as follow-up notes.")
         imap = c2.text_input("Mailbox server (IMAP). Empty = automatic", db.get_setting("imap_host", ""), key="set_imap")
         bk = c1.number_input("Email me a backup every N days (0 = never)", 0, 365, int(float(db.get_setting("backup_email_days") or 7)), key="set_bk")
+        rem_d = c1.number_input("Inactive DID: nobody answered -> remind again after N days (0 = never remind)", 0, 60,
+                                int(float(db.get_setting("did_reminder_days") or 3)), key="set_remd",
+                                help="Also printed at the bottom of every inactive-DID email, so people know what happens next.")
+        rem_m = c2.number_input("Inactive DID: send at most N reminders", 0, 20, int(float(db.get_setting("did_reminder_max") or 3)), key="set_remm")
         app_url = st.text_input("Your app link (used for the answer buttons in emails)", db.get_setting("app_url", ""), key="set_url",
                                 help="Example: https://your-app-name.streamlit.app")
         real = st.checkbox("✅ Send REAL emails (untick = DRY RUN, nothing is sent)", value=not mailer.is_dry_run(), key="set_real",
@@ -1200,6 +1359,8 @@ def page_settings():
             db.set_setting("read_replies", "true" if replies else "false")
             db.set_setting("imap_host", imap.strip())
             db.set_setting("backup_email_days", int(bk))
+            db.set_setting("did_reminder_days", int(rem_d))
+            db.set_setting("did_reminder_max", int(rem_m))
             if not config.DRY_RUN_ENV:
                 db.set_setting("dry_run", "false" if real else "true")
             set_flash("flash_settings", "ok", "Saved.")

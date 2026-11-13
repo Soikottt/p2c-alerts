@@ -30,46 +30,87 @@ SETTING_DEFAULTS = {
     "inbox_last_ok": "",           # (internal)
     "inbox_last_error": "",        # (internal)
     "inbox_next_run": "",          # (internal) after a failure, wait 30 minutes
+    "did_reminder_days": "3",      # nobody answered an inactive-DID email: remind again after N days (0 = never remind)
+    "did_reminder_max": "3",       # at most this many reminders per DID alert
+    "targets_sync_minutes": "60",  # how often the buyer targets and their caps are re-read from Ringba (usage is read every run)
+    "targets_next_run": "",        # (internal)
+    "targets_last_ok": "",         # (internal)
+    "targets_last_error": "",      # (internal)
     "backup_email_days": "7",      # email a backup (CSV zip) to the admin every N days. 0 = never
     "backup_next_run": "",         # (internal)
 }
 
 
-def get_engine():
-    global _engine
-    if _engine is None:
-        if not config.DB_URL:
-            raise RuntimeError("DATABASE_URL is missing. Add it to your Secrets (or .env file).")
-        kwargs = {"pool_pre_ping": True, "pool_recycle": 300}
-        if str(config.DB_URL).startswith("postgresql"):
-            kwargs["connect_args"] = {"connect_timeout": 15}      # never wait forever for the database to answer
-        _engine = create_engine(config.DB_URL, **kwargs)
-    return _engine
+STATEMENT_TIMEOUT_MS = 30000     # no single query may run longer than 30 s
+_IS_PG = False
 
 
 def get_engine():
-    global _engine
+    global _engine, _IS_PG
     if _engine is None:
         if not config.DB_URL:
             raise RuntimeError("DATABASE_URL is missing. Add it to your Secrets (or .env file).")
-        kwargs = {
-            "pool_pre_ping": False,  # Turned off: this was hanging on Neon
-            "pool_recycle": 300,
-            "pool_timeout": 10
-        }
-        if str(config.DB_URL).startswith("postgresql"):
+        kwargs = {"pool_pre_ping": True, "pool_recycle": 240}
+        _IS_PG = str(config.DB_URL).startswith("postgresql")
+        if _IS_PG:
+            # Neon puts idle databases to sleep and silently drops idle connections. A dead connection then looks alive
+            # and the "ping" before every query waits for ever. These settings make a dead connection fail in ~15 s.
             kwargs["connect_args"] = {
-                "connect_timeout": 10,
-                "options": "-c statement_timeout=10000" # No SQL query can run for more than 10 seconds
+                "connect_timeout": 15,          # opening a connection
+                "keepalives": 1, "keepalives_idle": 20, "keepalives_interval": 5, "keepalives_count": 3,
+                "tcp_user_timeout": 15000,      # data not acknowledged for 15 s -> the connection is declared dead
             }
         _engine = create_engine(config.DB_URL, **kwargs)
     return _engine
 
 
+def set_engine(engine):  # used by tests
+    global _engine
+    _engine = engine
+    clear_settings_cache()
+
+
+_DEAD_CONNECTION_HINTS = ("server closed the connection", "ssl syscall", "connection already closed", "terminating connection",
+                          "timeout expired", "could not connect", "connection timed out", "eof detected", "connection reset",
+                          "connection refused", "could not receive data", "ssl connection has been closed")
+
+
+def _is_connection_problem(e):
+    """True only for 'the connection died / could not be opened' errors (worth another try).
+    Real SQL mistakes, duplicate columns, slow queries (statement timeout) are NOT retried."""
+    if getattr(e, "connection_invalidated", False):
+        return True
+    msg = str(e).lower()
+    return any(h in msg for h in _DEAD_CONNECTION_HINTS)
+
+
+def _run(fn):
+    """Run fn(connection) in one transaction. If the connection turns out to be dead, throw the pool away and retry
+    (twice) instead of hanging or failing the whole 5-minute run on one bad connection."""
+    last = None
+    for attempt in range(3):
+        try:
+            eng = get_engine()
+            with eng.begin() as c:
+                if _IS_PG:
+                    c.exec_driver_sql(f"SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}")   # works through Neon's pooler too
+                return fn(c)
+        except Exception as e:
+            if attempt < 2 and _is_connection_problem(e):
+                last = e
+                try:
+                    get_engine().dispose()
+                except Exception:
+                    pass
+                time.sleep(1 + attempt)
+                continue
+            raise
+    raise last
+
+
 def q(sql, **params):
     """Run a SELECT (or INSERT ... RETURNING) and return a list of dicts."""
-    with get_engine().begin() as c:
-        return [dict(r) for r in c.execute(text(sql), params).mappings().all()]
+    return _run(lambda c: [dict(r) for r in c.execute(text(sql), params).mappings().all()])
 
 
 def q1(sql, **params):
@@ -79,21 +120,18 @@ def q1(sql, **params):
 
 def x(sql, **params):
     """Run a statement that changes data. Returns number of rows touched."""
-    with get_engine().begin() as c:
-        return c.execute(text(sql), params).rowcount
+    return _run(lambda c: c.execute(text(sql), params).rowcount)
 
 
 def q_in(sql, list_name, values, **params):
     """SELECT with an IN :list_name clause."""
     stmt = text(sql).bindparams(bindparam(list_name, expanding=True))
-    with get_engine().begin() as c:
-        return [dict(r) for r in c.execute(stmt, {list_name: list(values), **params}).mappings().all()]
+    return _run(lambda c: [dict(r) for r in c.execute(stmt, {list_name: list(values), **params}).mappings().all()])
 
 
 def x_in(sql, list_name, values, **params):
     stmt = text(sql).bindparams(bindparam(list_name, expanding=True))
-    with get_engine().begin() as c:
-        return c.execute(stmt, {list_name: list(values), **params}).rowcount
+    return _run(lambda c: c.execute(stmt, {list_name: list(values), **params}).rowcount)
 
 
 def bulk_upsert(table, columns, rows, conflict_col, update_cols, chunk=300):

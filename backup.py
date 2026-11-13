@@ -19,7 +19,8 @@ TABLES = [
     ("buyers", "SELECT id, name, ringba_buyer_id, status, watchlist, buyer_email, cc_buyer, extra_cc, notes FROM buyers ORDER BY name"),
     ("affiliate_managers", "SELECT id, name, email, active FROM affiliate_managers ORDER BY name"),
     ("publisher_managers", "SELECT publisher_id, manager_id FROM publisher_managers"),
-    ("caps", "SELECT id, entity_type, entity_id, period, metric, cap_value, thresholds, active, notes FROM caps ORDER BY id"),
+    ("caps", "SELECT id, entity_type, entity_id, campaign_name, period, metric, cap_value, thresholds, active, notes FROM caps ORDER BY id"),
+    ("targets", "SELECT id, ringba_target_id, name, buyer_name, active, daily_cap, monthly_cap, alerts_on, thresholds FROM targets ORDER BY id"),
     ("email_templates", "SELECT id, alert_type, name, subject, body FROM email_templates ORDER BY id"),
     ("alert_action_defs", "SELECT id, alert_type, label, effect, effect_days, active, sort_order FROM alert_action_defs ORDER BY id"),
 ]

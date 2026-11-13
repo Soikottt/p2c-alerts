@@ -24,6 +24,8 @@ RULE_SEEDS = [
      "Buyer reached a % of its cap. Percentages are set per cap on the Caps tab."),
     ("did_inactive", "Inactive DID", True, 30, None, True, False, True,
      "A DID had no calls for N days (counted from its last call, or from the day it was added). N = 'Days'."),
+    ("target_cap", "Buyer target cap warning", True, None, None, False, True, True,
+     "A buyer target reached a % of its daily or monthly cap. Caps and live usage are read from Ringba automatically."),
     ("engine_stale", "Alert engine was offline", True, None, 45, False, False, False,
      "The 5-minute engine did not run for N minutes. N = 'Count' (minutes)."),
     ("sync_error", "Ringba sync failed", True, None, None, False, False, False,
@@ -45,6 +47,9 @@ ACTION_SEEDS = [
     ("publisher_cap", "Pause this publisher", "record", None),
     ("buyer_cap", "I will contact the buyer", "snooze", 1),
     ("buyer_cap", "Cap will be increased in Ringba", "record", None),
+    ("target_cap", "I will contact the buyer", "snooze", 1),
+    ("target_cap", "Cap will be increased in Ringba", "record", None),
+    ("target_cap", "Target will be paused", "record", None),
 ]
 
 # Columns added after the first release (adding twice is harmless: the error is ignored)
@@ -60,6 +65,8 @@ ADD_COLUMNS = [
     ("dids", "affiliate_name", "TEXT"),
     ("dids", "next_charge_at", "TIMESTAMPTZ"),
     ("dids", "campaign_id", "TEXT"),
+    ("dids", "never_alert", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("caps", "campaign_name", "TEXT"),
     ("calls", "campaign_rid", "TEXT"),
     ("alerts", "case_status", "TEXT DEFAULT 'open'"),
     ("alerts", "case_updated_at", "TIMESTAMPTZ"),
@@ -152,6 +159,19 @@ def _add_columns():
             db.x(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         except Exception:
             pass   # column already exists
+
+
+def ensure_columns():
+    """Cheap check the engine runs every time: if the newest columns / tables are missing (the app was not opened after an
+    update), add them now, so an update of the code can never break the 5-minute run. Returns True if it changed anything."""
+    try:
+        db.q1("SELECT never_alert FROM dids LIMIT 1")
+        db.q1("SELECT campaign_name FROM caps LIMIT 1")
+        db.q1("SELECT ringba_target_id FROM targets LIMIT 1")
+        return False
+    except Exception:
+        run(log=lambda m: None, migrate=False)          # safe to repeat: every step is 'IF NOT EXISTS' / 'ON CONFLICT DO NOTHING'
+        return True
 
 
 def _seed_templates_and_actions():

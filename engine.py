@@ -18,6 +18,8 @@ import inbox
 import ingest
 import mailer
 import rules
+import targets
+import setup_db
 import ringba_client as rc
 from timeutil import fmt
 
@@ -62,6 +64,11 @@ def run_once(log=_emit, time_limit=None):
         return time.monotonic() - t0
 
     now = db.now_utc()
+    try:
+        if setup_db.ensure_columns():
+            say("database upgraded (new columns added)")
+    except Exception as ex:
+        say(f"database check skipped: {ex}")
     try:                                   # a run that was cancelled half-way leaves a 'running' record behind: close it
         n = db.x("UPDATE sync_runs SET status='error', finished_at=:n, error='Interrupted: the run was stopped before it finished' "
                  "WHERE status='running' AND started_at < :c", n=now, c=now - timedelta(minutes=15))
@@ -113,6 +120,30 @@ def run_once(log=_emit, time_limit=None):
             rc.set_deadline(None)
     else:
         say("DID list: skipped (this run is short of time)")
+
+    # ---- 2b. buyer target caps + live usage from Ringba (optional, at most ~75 s)
+    if elapsed() < limit - 120:
+        step("reading buyer target caps and usage from Ringba")
+        rc.set_deadline(75)
+        try:
+            r = targets.run()
+            if "definitions" in r:
+                d = r["definitions"]
+                say(f"targets: {d['in_ringba']} in Ringba, {d['added']} new, {d['updated']} updated, {d['removed']} removed; "
+                    f"{d['report']['with_daily_cap']} with a daily cap, {d['report']['with_monthly_cap']} with a monthly cap")
+            u = r["usage"]
+            say(f"target usage: {u['polled']} of {u['total']} read" + (f", {u['failed']} failed" if u["failed"] else "")
+                + (" (out of time, the rest next run)" if u.get("out_of_time") else "") + (f" - {u['error']}" if u.get("error") else ""))
+        except Exception as e:
+            say(f"target caps FAILED (will retry): {e}")
+            try:
+                alerts.create_alert("sync_error", f"targets_error:{now:%Y%m%d}", {"error": f"Target caps from Ringba failed: {str(e)[:500]}"})
+            except Exception:
+                pass
+        finally:
+            rc.set_deadline(None)
+    else:
+        say("target caps: skipped (this run is short of time)")
 
     # ---- 3. email replies (optional)
     if elapsed() < limit - 90:

@@ -12,7 +12,12 @@ CAP_PH = [("entity_type", "publisher or buyer"), ("name", "Publisher / buyer nam
           ("remaining", "Calls left"), ("period", "daily / monthly"), ("metric_label", "What counts (paid calls ...)"),
           ("window_start", "When this cap window started")]
 
+TARGET_PH = [("target", "Target name"), ("buyer", "Buyer name"), ("period", "daily / monthly"), ("percent", "Percent used now"),
+             ("level", "The alert level that was reached (e.g. 80)"), ("usage", "Calls used (live count from Ringba)"),
+             ("cap", "Cap size in Ringba"), ("remaining", "Calls left"), ("window_start", "When this cap window started")]
+
 PLACEHOLDERS = {
+    "target_cap": TARGET_PH,
     "new_publisher": [("call_number", "1 for the first call, 2 for the second ..."), ("first_n", "The N in 'first N calls'")] + CALL_PH,
     "lapsed_publisher": [("gap_days", "Days of silence"), ("last_call_time", "Time of the previous call")] + CALL_PH,
     "watchlist_buyer": CALL_PH,
@@ -25,7 +30,8 @@ PLACEHOLDERS = {
                      ("calls_30d", "Total calls on this DID in the last 30 days"),
                      ("last_note", "The latest follow-up note from the affiliate manager, or 'none yet'"),
                      ("added", "When the DID was created in Ringba"), ("next_charge", "Date Ringba charges for it next"),
-                     ("monthly_cost", "Monthly cost or 'not set'")],
+                     ("monthly_cost", "Monthly cost or 'not set'"),
+                     ("next_step", "What happens if nobody answers (reminder / pause rules, filled in automatically)")],
     "engine_stale": [("gap_minutes", "Minutes the engine was offline"), ("last_sync", "Time of the last good sync")],
     "sync_error": [("error", "The error message")],
     "alert_response": [("responder", "Name of the person who answered"), ("choice", "The option they clicked"),
@@ -47,6 +53,11 @@ DEFAULTS = {
                          "Publisher **{publisher}** just sent a call after **{gap_days} days** of silence (previous call: {last_call_time}).\n\n" + _CALL_BODY),
     "watchlist_buyer": ("Watchlist buyer {buyer} connected a call",
                         "A call **CONNECTED** to watchlist buyer **{buyer}**.\n\n" + _CALL_BODY),
+    "target_cap": ("TARGET CAP {percent}% ({period}): {target} - {buyer}",
+                   "**Target {target}** (buyer **{buyer}**) has used **{percent}%** of its **{period}** cap.\n\n"
+                   "- **Usage:** {usage} of {cap} calls (live count from Ringba)\n- **Remaining:** {remaining}\n"
+                   "- **Window started:** {window_start}\n- **Alert level:** {level}%\n\n"
+                   "**Action:** contact the buyer, or raise the cap in Ringba, before calls are wasted."),
     "publisher_cap": ("CAP {percent}%: {name} ({period}, {metric_label})", _CAP_BODY),
     "buyer_cap": ("CAP {percent}%: {name} ({period}, {metric_label})", _CAP_BODY),
     "did_inactive": ("Inactive DID {did} - {idle_days} days without calls",
@@ -55,7 +66,7 @@ DEFAULTS = {
                      "- **Total calls in the last 30 days:** {calls_30d}\n- **Created in Ringba:** {added}\n"
                      "- **Next charge:** {next_charge}\n- **Monthly cost:** {monthly_cost}\n"
                      "- **Last follow-up note:** {last_note}\n\n"
-                     "**Decision needed:** release this DID to avoid the next charge, or keep it for now?"),
+                     "**Decision needed:** release this DID to avoid the next charge, or keep it for now?\n\n{next_step}"),
     "engine_stale": ("Alert engine was offline for {gap_minutes} minutes",
                      "The last successful Ringba sync was at **{last_sync}** ({gap_minutes} minutes ago).\n"
                      "Calls in that gap are caught up now, but alerts were late. Check GitHub Actions if this repeats."),
@@ -72,7 +83,7 @@ OLD_BODIES = {
     'watchlist_buyer': ('A call CONNECTED to watchlist buyer {buyer}.\n\nTime: {time}\nPublisher: {publisher}\nBuyer: {buyer}\nDID (number dialed): {did}\nCampaign: {campaign}\nConnected: {connected}   Converted: {converted}   Paid: {paid}',),
     'publisher_cap': ('{entity_type} {name} has used {percent}% of its {period} cap.\n\nUsage: {usage} of {cap} ({metric_label})\nRemaining: {remaining}\nWindow started: {window_start}\nAlert level: {level}%\n\nAction: contact the {entity_type} or set up another route before calls are wasted.',),
     'buyer_cap': ('{entity_type} {name} has used {percent}% of its {period} cap.\n\nUsage: {usage} of {cap} ({metric_label})\nRemaining: {remaining}\nWindow started: {window_start}\nAlert level: {level}%\n\nAction: contact the {entity_type} or set up another route before calls are wasted.',),
-    'did_inactive': ('DID {did}{label_part} has had no calls for {idle_days} days.\n\nPublisher: {publisher}\nCampaign: {campaign}\nLast call on this DID: {last_call}\nTotal calls in the last 30 days: {calls_30d}\nCreated in Ringba: {added}\nNext charge: {next_charge}\nMonthly cost: {monthly_cost}\nLast follow-up note: {last_note}\n\nDecision needed: release this DID to avoid the next charge, or keep it for now?', 'DID {did}{label_part} has had no calls for {idle_days} days.\nCreated / added: {added}\nLast call: {last_call}\nMonthly cost: {monthly_cost}\n\nDecision needed: release this DID to avoid the monthly charge, or keep it for now?', 'DID {did}{label_part} has had no calls for {idle_days} days.\nPublisher: {publisher}\nCreated in Ringba: {added}\nLast call: {last_call}\nNext charge: {next_charge}\nMonthly cost: {monthly_cost}\n\nDecision needed: release this DID to avoid the next charge, or keep it for now?',),
+    'did_inactive': ('**DID {did}{label_part}** has had **no calls for {idle_days} days**.\n\n- **Publisher:** {publisher}\n- **Campaign:** {campaign}\n- **Last call on this DID:** {last_call}\n- **Total calls in the last 30 days:** {calls_30d}\n- **Created in Ringba:** {added}\n- **Next charge:** {next_charge}\n- **Monthly cost:** {monthly_cost}\n- **Last follow-up note:** {last_note}\n\n**Decision needed:** release this DID to avoid the next charge, or keep it for now?', 'DID {did}{label_part} has had no calls for {idle_days} days.\n\nPublisher: {publisher}\nCampaign: {campaign}\nLast call on this DID: {last_call}\nTotal calls in the last 30 days: {calls_30d}\nCreated in Ringba: {added}\nNext charge: {next_charge}\nMonthly cost: {monthly_cost}\nLast follow-up note: {last_note}\n\nDecision needed: release this DID to avoid the next charge, or keep it for now?', 'DID {did}{label_part} has had no calls for {idle_days} days.\nCreated / added: {added}\nLast call: {last_call}\nMonthly cost: {monthly_cost}\n\nDecision needed: release this DID to avoid the monthly charge, or keep it for now?', 'DID {did}{label_part} has had no calls for {idle_days} days.\nPublisher: {publisher}\nCreated in Ringba: {added}\nLast call: {last_call}\nNext charge: {next_charge}\nMonthly cost: {monthly_cost}\n\nDecision needed: release this DID to avoid the next charge, or keep it for now?',),
     'engine_stale': ('The last successful Ringba sync was at {last_sync} ({gap_minutes} minutes ago).\nCalls in that gap are caught up now, but alerts were late. Check GitHub Actions if this repeats.',),
     'sync_error': ('The engine could not read calls from Ringba.\n\nError: {error}',),
     'alert_response': ('{responder} answered an alert.\n\nAlert: {original_subject}\nAnswer: {choice}\nNote: {note}\n\nWhat the system did: {effect_text}',),
@@ -89,10 +100,13 @@ SAMPLE["lapsed_publisher"] = {**SAMPLE["call"], "gap_days": "41", "last_call_tim
 SAMPLE["watchlist_buyer"] = SAMPLE["call"]
 SAMPLE["publisher_cap"] = {**SAMPLE["cap"], "entity_type": "publisher", "name": "Acme Media", "metric_label": "converted calls"}
 SAMPLE["buyer_cap"] = SAMPLE["cap"]
+SAMPLE["target_cap"] = {"target": "Rehab - Best Rehab Co (Texas)", "buyer": "Best Rehab Co", "period": "monthly", "percent": "92", "level": "90",
+                        "usage": "460", "cap": "500", "remaining": "40", "window_start": "2026-11-01 12:00 AM EST"}
 SAMPLE["did_inactive"] = {"did": "+16143505503", "label": "Rehab line", "label_part": " (Rehab line)", "publisher": "Acme Media",
                           "campaign": "Rehab", "calls_30d": "0", "last_note": "Mia (Nov 2): publisher paused, will restart next week",
                           "idle_days": "34", "last_call": "2026-10-06 04:41 PM EDT", "added": "2026-06-12 09:30 AM EDT",
-                          "next_charge": "2026-11-28", "monthly_cost": "$2.50"}
+                          "next_charge": "2026-11-28", "monthly_cost": "$2.50",
+                          "next_step": "If nobody answers this email: a reminder is sent in 3 day(s) (reminder 1 of 3). If you click a 'wait' button, this DID is paused for those days and you get a follow-up email when the pause ends. The alert is never paused for ever."}
 SAMPLE["engine_stale"] = {"gap_minutes": "95", "last_sync": "2026-11-09 01:10 PM EST"}
 SAMPLE["sync_error"] = {"error": "HTTP 429: Rate limit exceeded"}
 SAMPLE["alert_response"] = {"responder": "Mia", "choice": "Remove this DID", "note": "Publisher confirmed they stopped",

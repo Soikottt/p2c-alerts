@@ -74,8 +74,18 @@ def build_recipients(rule, publisher_id=None, buyer_id=None):
     return to, final
 
 
+def existing_keys(keys):
+    """Which of these dedupe keys already have an alert? One question per 500 keys. The rules use it to skip
+    everything that was already alerted, instead of rebuilding (and re-checking) the same emails every 5 minutes."""
+    keys = list(set(keys))
+    found = set()
+    for i in range(0, len(keys), 500):
+        found |= {r["dedupe_key"] for r in db.q_in("SELECT dedupe_key FROM alerts WHERE dedupe_key IN :k", "k", keys[i:i + 500])}
+    return found
+
+
 def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=None, status="pending",
-                 snooze_key=None, subject=None, body=None):
+                 snooze_key=None, subject=None, body=None, subject_tag=""):
     """Queue one email. Returns True if it was new (the same dedupe_key is never queued twice).
     The wording comes from the alert's template; ctx fills the {placeholders}."""
     import actions
@@ -88,7 +98,9 @@ def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=N
     body_html = None
     if subject is None:
         subj_t, body_t = templates.get_template(alert_type, rule)
-        subject = templates.render(subj_t, ctx)
+        if ctx and ctx.get("next_step") and "{next_step}" not in body_t:
+            body_t = body_t + "\n\n{next_step}"        # a template you edited earlier still gets the 'if nobody answers' note
+        subject = subject_tag + templates.render(subj_t, ctx)
         body, body_html = templates.render_body(body_t, ctx)      # plain text + formatted HTML version
     to, cc = build_recipients(rule, publisher_id, buyer_id)
     prefix = db.get_setting("subject_prefix", "[P2C Alert]")
@@ -106,3 +118,21 @@ def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=N
     text, html = (actions.attach(alert_id, alert_type, body, body_html) if status == "pending" else (body, body_html))
     db.x("UPDATE alerts SET subject=:s, body=:b, body_html=:h WHERE id=:i", s=full_subject, b=text, h=html, i=alert_id)
     return True
+
+
+def delete_alerts(ids, also_resume_pauses=True):
+    """Permanently delete alerts (for example test alerts) with their answer buttons and notes.
+    The engine can then create a fresh alert for the same DID / cap, because the old one no longer blocks it.
+    Returns how many alerts were deleted."""
+    ids = sorted({int(i) for i in ids})
+    deleted = 0
+    for i in range(0, len(ids), 500):
+        part = ids[i:i + 500]
+        keys = [r["snooze_key"] for r in db.q_in("SELECT DISTINCT snooze_key FROM alerts WHERE id IN :ids AND snooze_key IS NOT NULL",
+                                                 "ids", part)]
+        db.x_in("DELETE FROM alert_actions WHERE alert_id IN :ids", "ids", part)
+        db.x_in("DELETE FROM alert_notes WHERE alert_id IN :ids", "ids", part)
+        deleted += db.x_in("DELETE FROM alerts WHERE id IN :ids", "ids", part)
+        if also_resume_pauses and keys:
+            db.x_in("DELETE FROM snoozes WHERE entity_key IN :ks", "ks", keys)
+    return deleted

@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS dids (
   publisher_id INTEGER,
   affiliate_name TEXT,
   next_charge_at TIMESTAMPTZ,
-  campaign_id TEXT
+  campaign_id TEXT,
+  never_alert BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS calls (
@@ -213,4 +214,21 @@ CREATE TABLE IF NOT EXISTS inbound_emails (
   from_email TEXT,
   outcome TEXT,
   received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS targets (
+  id SERIAL PRIMARY KEY,
+  ringba_target_id TEXT UNIQUE NOT NULL,
+  name TEXT,
+  buyer_id INTEGER,
+  buyer_name TEXT,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  daily_cap INTEGER,
+  monthly_cap INTEGER,
+  alerts_on BOOLEAN NOT NULL DEFAULT TRUE,
+  thresholds TEXT NOT NULL DEFAULT '80,100',
+  count_day INTEGER,
+  count_month INTEGER,
+  counts_at TIMESTAMPTZ,
+  synced_at TIMESTAMPTZ
 );

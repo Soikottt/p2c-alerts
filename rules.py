@@ -47,8 +47,36 @@ def _recent_live_calls(now, extra_where=""):
                     LEFT JOIN publishers p ON p.id = c.publisher_id
                     LEFT JOIN buyers b ON b.id = c.buyer_id
                     LEFT JOIN dids d ON d.id = c.did_id
-                    WHERE c.source = 'live' AND c.created_at >= :since {extra_where}
+                    WHERE c.source = 'live' AND c.created_at >= :since
+                      AND COALESCE(d.never_alert, FALSE) = FALSE {extra_where}
                     ORDER BY c.call_at, c.call_id""", since=since)
+
+
+def _recent_live_calls_ranked(now):
+    """The recent live calls of publishers, each with its position in that publisher's history (call_rank: 1 = the
+    publisher's very first call) and the time of the publisher's previous call (prev_call_at). ONE query does it all;
+    before, the database was asked two extra questions for every single call (162 calls = 324 round trips = minutes)."""
+    since = now - timedelta(hours=LOOKBACK_HOURS)
+    return db.q("""WITH recent AS (
+                       SELECT c.call_id, c.call_at, c.publisher_id, c.buyer_id, c.connected, c.converted, c.paid,
+                              c.campaign_name, c.caller_number AS caller, p.name AS pub_name, b.name AS buyer_name,
+                              d.number AS did
+                       FROM calls c
+                       LEFT JOIN publishers p ON p.id = c.publisher_id
+                       LEFT JOIN buyers b ON b.id = c.buyer_id
+                       LEFT JOIN dids d ON d.id = c.did_id
+                       WHERE c.source = 'live' AND c.created_at >= :since AND c.publisher_id IS NOT NULL
+                         AND COALESCE(d.never_alert, FALSE) = FALSE
+                   ), ordered AS (
+                       SELECT x.call_id,
+                              ROW_NUMBER() OVER (PARTITION BY x.publisher_id ORDER BY x.call_at, x.call_id) AS call_rank,
+                              LAG(x.call_at) OVER (PARTITION BY x.publisher_id ORDER BY x.call_at, x.call_id) AS prev_call_at
+                       FROM calls x
+                       WHERE x.publisher_id IN (SELECT publisher_id FROM recent)
+                   )
+                   SELECT r.*, o.call_rank, o.prev_call_at
+                   FROM recent r JOIN ordered o ON o.call_id = r.call_id
+                   ORDER BY r.call_at, r.call_id""", since=since)
 
 
 def rule_new_and_lapsed_publisher(now):
@@ -56,62 +84,39 @@ def rule_new_and_lapsed_publisher(now):
     new_on, lap_on = bool(nr and nr["enabled"]), bool(lr and lr["enabled"])
     if not (new_on or lap_on):
         return 0
-    
     n_first = int((nr or {}).get("param_count") or 10)
     lapse_days = int((lr or {}).get("param_days") or 30)
-    made = 0
-    
-    recent_calls = _recent_live_calls(now)
-    if not recent_calls:
-        return 0
-
-    # 1. Get all unique publisher IDs from the recent calls
-    pub_ids = list({c["publisher_id"] for c in recent_calls if c["publisher_id"]})
-    if not pub_ids:
-        return 0
-
-    # 2. Fetch ALL historical calls for these publishers in ONE query
-    hist_calls = db.q_in("SELECT call_id, publisher_id, call_at FROM calls WHERE publisher_id IN :ids ORDER BY call_at", "ids", pub_ids)
-    
-    # 3. Group the history by publisher ID
-    from collections import defaultdict
-    pub_history = defaultdict(list)
-    for hc in hist_calls:
-        pub_history[hc["publisher_id"]].append(hc)
-
-    # 4. Process the recent calls using the pre-loaded history
-    for c in recent_calls:
-        if not c["publisher_id"]:
-            continue
+    rows = _recent_live_calls_ranked(now)
+    todo = []                                        # (alert type, key, call, extra info), before skipping what was already alerted
+    for c in rows:
         t = to_dt(c["call_at"])
-        
-        # Find the rank in Python (much faster than querying the database)
-        history = pub_history[c["publisher_id"]]
-        prev_calls = [h for h in history if h["call_at"] < t or (h["call_at"] == t and h["call_id"] <= c["call_id"])]
-        rank = len(prev_calls)
-
+        rank = int(c["call_rank"])
         if new_on and rank <= n_first:
-            ctx = {**_call_ctx(c), "call_number": rank, "first_n": n_first}
-            if alerts.create_alert("new_publisher", f"newpub:{c['publisher_id']}:{c['call_id']}", ctx,
-                                   publisher_id=c["publisher_id"], buyer_id=c["buyer_id"]):
-                made += 1
-
-        if lap_on and rank > 1:
-            prev_call = prev_calls[-2]
-            prev_t = to_dt(prev_call["call_at"])
-            if prev_t and (t - prev_t) > timedelta(days=lapse_days):
-                ctx = {**_call_ctx(c), "gap_days": (t - prev_t).days, "last_call_time": fmt(prev_t)}
-                if alerts.create_alert("lapsed_publisher", f"lapsed:{c['publisher_id']}:{c['call_id']}", ctx,
-                                       publisher_id=c["publisher_id"], buyer_id=c["buyer_id"]):
-                    made += 1
+            todo.append(("new_publisher", f"newpub:{c['publisher_id']}:{c['call_id']}", c, {"call_number": rank, "first_n": n_first}))
+        if lap_on and rank > 1 and c["prev_call_at"]:
+            prev = to_dt(c["prev_call_at"])
+            if prev and (t - prev) > timedelta(days=lapse_days):
+                todo.append(("lapsed_publisher", f"lapsed:{c['publisher_id']}:{c['call_id']}", c,
+                             {"gap_days": (t - prev).days, "last_call_time": fmt(prev)}))
+    known = alerts.existing_keys([k for _, k, _, _ in todo])
+    made = 0
+    for atype, key, c, more in todo:
+        if key in known:
+            continue
+        if alerts.create_alert(atype, key, {**_call_ctx(c), **more}, publisher_id=c["publisher_id"], buyer_id=c["buyer_id"]):
+            made += 1
     return made
 
 
 def rule_watchlist_buyer(now):
     if not alerts.rule_enabled("watchlist_buyer"):
         return 0
+    calls = _recent_live_calls(now, "AND c.connected = TRUE AND b.watchlist = TRUE")
+    known = alerts.existing_keys([f"watch:{c['call_id']}" for c in calls])
     made = 0
-    for c in _recent_live_calls(now, "AND c.connected = TRUE AND b.watchlist = TRUE"):
+    for c in calls:
+        if f"watch:{c['call_id']}" in known:
+            continue
         if alerts.create_alert("watchlist_buyer", f"watch:{c['call_id']}", _call_ctx(c),
                                publisher_id=c["publisher_id"], buyer_id=c["buyer_id"]):
             made += 1
@@ -123,12 +128,15 @@ def cap_usage(cap, now):
     start, key = window_start(cap["period"], now)
     col = ENTITY_COL[cap["entity_type"]]
     metric = METRIC_SQL.get(cap["metric"], METRIC_SQL["paid"])
-    usage = db.q1(f"SELECT COUNT(*) AS n FROM calls c WHERE c.{col}=:e AND c.call_at >= :s AND {metric}",
-                  e=cap["entity_id"], s=start)["n"]
+    camp = (cap.get("campaign_name") or "").strip() if cap["entity_type"] == "publisher" else ""
+    usage = db.q1(f"SELECT COUNT(*) AS n FROM calls c WHERE c.{col}=:e AND c.call_at >= :s AND {metric}"
+                  + (" AND c.campaign_name = :camp" if camp else ""),
+                  e=cap["entity_id"], s=start, **({"camp": camp} if camp else {}))["n"]
     table = "publishers" if cap["entity_type"] == "publisher" else "buyers"
     ent = db.q1(f"SELECT name FROM {table} WHERE id=:i", i=cap["entity_id"])
     pct = usage / cap["cap_value"] * 100 if cap["cap_value"] else 0
-    return {"usage": usage, "pct": pct, "start": start, "key": key, "name": ent["name"] if ent else "?"}
+    name = ent["name"] if ent else "?"
+    return {"usage": usage, "pct": pct, "start": start, "key": key, "name": f"{name} / campaign {camp}" if camp else name}
 
 
 def rule_caps(now):
@@ -158,36 +166,139 @@ def rule_caps(now):
     return made
 
 
+def next_step_text(days, remind_days, remind_max, reminders_sent, next_cycle_idle):
+    """The sentence at the bottom of every inactive-DID email: what happens if nobody answers."""
+    if remind_days > 0 and reminders_sent < remind_max:
+        return (f"If nobody answers this email: a reminder is sent in {remind_days} day(s) "
+                f"(reminder {reminders_sent + 1} of {remind_max}). If you click a 'wait' button, this DID is paused for those days "
+                f"and you get a follow-up email when the pause ends. The alert is never paused for ever.")
+    if remind_days > 0:
+        return (f"This was the last reminder. If nobody answers, nothing more is sent for this DID until it reaches "
+                f"{next_cycle_idle} days without calls, then a new alert starts. The alert is never paused for ever.")
+    return (f"If nobody answers this email: no reminder is sent. A new alert for this DID starts when it reaches "
+            f"{next_cycle_idle} days without calls. If you click a 'wait' button, you get a follow-up email when the pause ends.")
+
+
+def rule_target_caps(now):
+    """Buyer target caps (daily AND monthly). Limits and live usage come from Ringba (see targets.py)."""
+    if not alerts.rule_enabled("target_cap"):
+        return 0
+    import targets as tg
+    made = 0
+    for t in db.q("SELECT * FROM targets WHERE active = TRUE AND alerts_on = TRUE AND counts_at IS NOT NULL"):
+        at = to_dt(t["counts_at"])
+        if now - at > timedelta(minutes=tg.STALE_MINUTES):
+            continue                                   # usage is old (the poll did not get through): never alert on old numbers
+        for period, cap, used in (("daily", t["daily_cap"], t["count_day"]), ("monthly", t["monthly_cap"], t["count_month"])):
+            if not cap:
+                continue
+            used = int(used or 0)
+            pct = used / cap * 100
+            reached = [x for x in parse_thresholds(t["thresholds"]) if pct >= x]
+            if not reached:
+                continue
+            top = max(reached)
+            start, wkey = window_start(period, at)     # the window the numbers were read in, so midnight cannot cause a repeat
+            ctx = {"target": t["name"] or t["ringba_target_id"], "buyer": t["buyer_name"] or "-", "period": period,
+                   "percent": f"{pct:.0f}", "level": top, "usage": used, "cap": cap, "remaining": max(cap - used, 0),
+                   "window_start": fmt(start)}
+            base = f"target:{t['id']}:{period}:{cap}:{wkey}"
+            if alerts.create_alert("target_cap", f"{base}:{top}", ctx, buyer_id=t["buyer_id"], snooze_key=f"target:{t['id']}:{period}"):
+                made += 1
+                for lower in reached:
+                    if lower != top:
+                        alerts.create_alert("target_cap", f"{base}:{lower}", status="skipped", subject="(skipped)", body="skipped")
+    return made
+
+
 def rule_inactive_dids(now):
+    """One alert per DID per idle period. If nobody answers, it is repeated as a REMINDER every `did_reminder_days`
+    days (at most `did_reminder_max` times). If somebody clicked 'wait N days', a FOLLOW-UP goes out when the pause ends.
+    DIDs ticked 'Never alert' are skipped completely."""
     rule = alerts.get_rule("did_inactive")
     if not rule or not rule["enabled"]:
         return 0
     days = int(rule["param_days"] or 30)
-    made = 0
+    remind_days = max(int(float(db.get_setting("did_reminder_days", "3") or 0)), 0)
+    remind_max = max(int(float(db.get_setting("did_reminder_max", "3") or 0)), 0)
+    # a DID that became 'never alert' must not send an email that was still waiting in the queue
+    db.x("UPDATE alerts SET status='skipped' WHERE status='pending' AND alert_type='did_inactive' AND snooze_key IN "
+         "(SELECT 'did:' || CAST(id AS TEXT) FROM dids WHERE never_alert = TRUE)")
+    idle_dids = []
+    for d in db.q("SELECT * FROM dids WHERE status = 'active' AND COALESCE(never_alert, FALSE) = FALSE"):
+        ref = to_dt(d["last_call_at"]) or to_dt(d["added_at"])
+        if ref and (now - ref).days >= days:
+            idle_dids.append((d, ref, (now - ref).days))
+    if not idle_dids:
+        return 0
+
+    chains = {}       # base key -> that idle period's alerts, oldest first (the alert, its reminders, its follow-ups)
+    for a in db.q("SELECT id, dedupe_key, status, created_at, sent_at, response_label, responded_at, case_status FROM alerts "
+                  "WHERE alert_type='did_inactive' AND status <> 'skipped' AND dedupe_key LIKE 'did:%' ORDER BY id"):
+        parts = a["dedupe_key"].split(":")
+        if len(parts) >= 4:
+            chains.setdefault(":".join(parts[:4]), []).append(a)
+    snoozes = {r["entity_key"]: to_dt(r["snooze_until"]) for r in db.q("SELECT entity_key, snooze_until FROM snoozes WHERE entity_key LIKE 'did:%'")}
+
     import cases
     import dids as didtools
-    pub_names = {p["id"]: p["name"] for p in db.q("SELECT id, name FROM publishers")}
-    active = db.q("SELECT * FROM dids WHERE status = 'active'")
-    camp = didtools.campaign_names(active)
-    calls30 = didtools.calls_last_30d(now)
-    notes = cases.latest_by_did()
-    for d in active:
-        ref = to_dt(d["last_call_at"]) or to_dt(d["added_at"])
-        if not ref:
-            continue
-        idle = (now - ref).days
-        if idle < days:
-            continue
+    extra = {}
+
+    def load_extra():                      # the heavy lookups are only done when an email is really going to be made
+        if not extra:
+            active = [d for d, _, _ in idle_dids]
+            extra.update(pub={p["id"]: p["name"] for p in db.q("SELECT id, name FROM publishers")},
+                         camp=didtools.campaign_names(active), calls30=didtools.calls_last_30d(now),
+                         notes=cases.latest_by_did())
+        return extra
+
+    def make_ctx(d, idle, cycle, reminders_sent):
+        e = load_extra()
+        return {"did": d["number"], "label": d["label"] or "", "label_part": f" ({d['label']})" if d["label"] else "",
+                "idle_days": idle, "last_call": fmt(d["last_call_at"]) if d["last_call_at"] else "never",
+                "added": fmt(d["added_at"]), "publisher": e["pub"].get(d["publisher_id"]) or d["affiliate_name"] or "none",
+                "next_charge": fmt(d["next_charge_at"], False) if d["next_charge_at"] else "unknown",
+                "monthly_cost": f"${float(d['monthly_cost']):.2f}" if d["monthly_cost"] is not None else "not set",
+                "campaign": e["camp"].get(d["id"]) or "unknown", "calls_30d": e["calls30"].get(d["id"], 0),
+                "last_note": cases.one_line(e["notes"].get(d["id"]), fmt) or "none yet",
+                "next_step": next_step_text(days, remind_days, remind_max, reminders_sent, (cycle + 1) * days)}
+
+    made = 0
+    for d, ref, idle in idle_dids:
         cycle = idle // days
-        ctx = {"did": d["number"], "label": d["label"] or "", "label_part": f" ({d['label']})" if d["label"] else "",
-               "idle_days": idle, "last_call": fmt(d["last_call_at"]) if d["last_call_at"] else "never",
-               "added": fmt(d["added_at"]), "publisher": pub_names.get(d["publisher_id"]) or d["affiliate_name"] or "none",
-               "next_charge": fmt(d["next_charge_at"], False) if d["next_charge_at"] else "unknown",
-               "monthly_cost": f"${float(d['monthly_cost']):.2f}" if d["monthly_cost"] is not None else "not set",
-               "campaign": camp.get(d["id"]) or "unknown", "calls_30d": calls30.get(d["id"], 0),
-               "last_note": cases.one_line(notes.get(d["id"]), fmt) or "none yet"}
-        if alerts.create_alert("did_inactive", f"did:{d['id']}:{ref.date()}:{cycle}", ctx, publisher_id=d["publisher_id"],
-                               snooze_key=f"did:{d['id']}"):
+        base = f"did:{d['id']}:{ref.date()}:{cycle}"
+        chain = chains.get(base, [])
+        key, tag, reminders_sent = base, "", 0
+        if chain:
+            last = chain[-1]
+            if last["status"] == "pending":
+                continue                                    # not even sent yet
+            case = last["case_status"] or "open"
+            when = to_dt(last["sent_at"] or last["created_at"])
+            reminders_sent = 0
+            for a in reversed(chain):                       # reminders since the newest real alert / follow-up
+                if ":r" in a["dedupe_key"][len(base):]:
+                    reminders_sent += 1
+                else:
+                    break
+            if not last["response_label"] and case == "open":
+                # nobody answered at all
+                if remind_days <= 0 or reminders_sent >= remind_max or when + timedelta(days=remind_days) > now:
+                    continue
+                key, tag = f"{base}:r{last['id']}", f"REMINDER {reminders_sent + 1}/{remind_max}: "
+                reminders_sent += 1
+            elif last["response_label"] and case in ("open", "follow_up"):
+                # somebody clicked 'wait N days': when that pause is over, ask again
+                until = snoozes.get(f"did:{d['id']}")
+                responded = to_dt(last["responded_at"])
+                if not (until and until <= now and responded and until > responded):
+                    continue
+                key, tag, reminders_sent = f"{base}:f{last['id']}", "FOLLOW-UP (pause ended): ", 0
+            else:
+                continue                                    # answered / being handled by the team
+        ctx = make_ctx(d, idle, cycle, reminders_sent)
+        if alerts.create_alert("did_inactive", key, ctx, publisher_id=d["publisher_id"], snooze_key=f"did:{d['id']}",
+                               subject_tag=tag):
             made += 1
     return made
 
@@ -196,6 +307,6 @@ def run_all(now=None):
     now = now or db.now_utc()
     out = {}
     for name, fn in [("publishers", rule_new_and_lapsed_publisher), ("watchlist", rule_watchlist_buyer),
-                     ("caps", rule_caps), ("dids", rule_inactive_dids)]:
+                     ("caps", rule_caps), ("targets", rule_target_caps), ("dids", rule_inactive_dids)]:
         out[name] = fn(now)
     return out

@@ -91,8 +91,8 @@ KEYS = {
     "call_iso": ["tag:Date:ISODate"],
     "publisher_id": ["publisherId", "Publisher ID"],
     "publisher_name": ["publisherName", "Publisher"],
-    "buyer_id": ["buyerId", "targetId", "Buyer ID", "Target ID"],       # <-- ADDED targetId
-    "buyer_name": ["buyer", "buyerName", "targetName", "Buyer", "Target"], # <-- ADDED targetName
+    "buyer_id": ["buyerId", "Buyer ID"],
+    "buyer_name": ["buyer", "buyerName", "Buyer"],
     "target_name": ["targetName", "Target"],
     "campaign_name": ["campaignName", "Campaign"],
     "campaign_id": ["campaignId", "Campaign ID"],
@@ -108,11 +108,12 @@ KEYS = {
     "incomplete": ["isIncomplete", "Incomplete"],
     "duration": ["callLengthInSeconds", "Duration", "tag:CallLength:Total"],
     "connected_len": ["connectedCallLengthInSeconds", "Connected Call Length"],
-    "revenue": ["conversionAmount", "Revenue", "revenue"],              # <-- ADDED lowercase revenue
-    "payout": ["payoutAmount", "Payout", "payout"],                     # <-- ADDED lowercase payout
+    "revenue": ["conversionAmount", "Revenue"],
+    "payout": ["payoutAmount", "Payout"],
     "profit": ["profitNet", "Profit Net Telco"],
     "telco_cost": ["telcoCost", "Telco Cost"],
 }
+
 
 # ---------- value helpers ----------
 def norm(h):
@@ -553,6 +554,124 @@ def fetch_numbers():
     except ValueError:
         raise RingbaError(f"Ringba did not return JSON for the numbers list: {r.text[:300]}")
     return parse_numbers(data)
+
+
+# ---------- buyer targets and their caps ----------
+#   GET /v2/{accountId}/targets                       -> the targets (each has a 'schedule' with hourlyCap / dailyCap / monthlyCap ...)
+#   GET /v2/{accountId}/targets/{targetId}            -> one target in full (used when the list has no 'schedule')
+#   GET /v2/{accountId}/targets/{targetId}/Counts     -> live counters: {"stats": {"<targetId>": {"currentDay": 8, "currentMonth": 120, ...}}}
+# A cap of -1 means "no cap set".
+def _auth_headers():
+    if not config.RINGBA_TOKEN or not config.RINGBA_ACCOUNT_ID:
+        raise RingbaError("RINGBA_API_TOKEN or RINGBA_ACCOUNT_ID is missing in your Secrets.")
+    return {"Authorization": f"Token {config.RINGBA_TOKEN}", "Content-Type": "application/json"}
+
+
+def _json(r, what):
+    try:
+        return r.json()
+    except ValueError:
+        raise RingbaError(f"Ringba did not return JSON for {what}: {r.text[:300]}")
+
+
+def cap_value(v):
+    """Ringba cap -> a whole number of calls, or None when no cap is set (-1, 0, empty, not a number)."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return None
+    return int(n) if n > 0 else None
+
+
+def extract_target_items(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in ("targets", "data", "items", "result", "results", "records"):
+            v = data.get(k)
+            if isinstance(v, list):
+                return v
+            if isinstance(v, dict):
+                inner = extract_target_items(v)
+                if inner:
+                    return inner
+    return []
+
+
+def parse_target(it):
+    """One target from Ringba -> {'rid','name','buyer_rid','buyer_name','enabled','daily_cap','monthly_cap'} (or None)."""
+    if not isinstance(it, dict):
+        return None
+    rid = as_str(_pick(it, ["id", "targetId"]))
+    if not rid:
+        return None
+    sched = it.get("schedule") if isinstance(it.get("schedule"), dict) else {}
+    buyer = it.get("buyer") if isinstance(it.get("buyer"), dict) else {}
+    enabled = _pick(it, ["enabled", "isEnabled", "active", "isActive"])
+    if enabled is None and isinstance(it.get("state"), str):
+        enabled = it["state"].strip().lower() in ("enabled", "active", "on")
+    return {"rid": rid, "name": as_str(_pick(it, ["name", "targetName"])) or rid,
+            "buyer_rid": as_str(buyer.get("id") or _pick(it, ["buyerId"])),
+            "buyer_name": as_str(buyer.get("name") or _pick(it, ["buyerName"]) or (it.get("buyer") if isinstance(it.get("buyer"), str) else None)),
+            "enabled": True if enabled is None else bool(enabled),
+            "daily_cap": cap_value(_pick(sched, ["dailyCap"]) if sched else None),
+            "monthly_cap": cap_value(_pick(sched, ["monthlyCap"]) if sched else None),
+            "has_schedule": bool(sched)}
+
+
+def fetch_targets(max_details=300):
+    """Every buyer target on the account with its daily / monthly cap. Returns (list, report)."""
+    headers = _auth_headers()
+    acct = config.RINGBA_ACCOUNT_ID
+    data = _json(_get(f"{BASE}/{acct}/targets", headers), "the targets list")
+    items = extract_target_items(data)
+    out, details, bad = [], 0, 0
+    for it in items:
+        t = parse_target(it)
+        if t is None:
+            bad += 1
+            continue
+        if not t["has_schedule"] and details < max_details:         # the list had no cap info: ask for this target in full
+            details += 1
+            _nap(0.2)
+            d = _json(_get(f"{BASE}/{acct}/targets/{t['rid']}", headers), f"target {t['rid']}")
+            if isinstance(d, dict) and isinstance(d.get("target"), dict):
+                d = d["target"]
+            full = parse_target({**it, **d}) if isinstance(d, dict) else None
+            t = full or t
+        out.append(t)
+    keys = sorted({k for it in items if isinstance(it, dict) for k in it})[:40]
+    report = {"count": len(items), "parsed": len(out), "invalid": bad, "detail_calls": details,
+              "with_daily_cap": sum(1 for t in out if t["daily_cap"]), "with_monthly_cap": sum(1 for t in out if t["monthly_cap"]),
+              "first_item_keys": keys}
+    if items and not out:
+        raise RingbaError("Ringba returned targets but I could not find their id field. Fields it returned: " + ", ".join(keys))
+    return out, report
+
+
+def parse_counts(data, target_id):
+    """Live counters of one target. The id in the answer may be written with other capitalisation."""
+    stats = data.get("stats") if isinstance(data, dict) else None
+    if not isinstance(stats, dict) or not stats:
+        return None
+    row = next((v for k, v in stats.items() if str(k).lower() == str(target_id).lower()), None)
+    if row is None and len(stats) == 1:
+        row = next(iter(stats.values()))
+    if not isinstance(row, dict):
+        return None
+    def n(k):
+        try:
+            return int(float(row.get(k) or 0))
+        except (TypeError, ValueError):
+            return 0
+    return {"day": n("currentDay"), "month": n("currentMonth"), "hour": n("currentHour"), "live": n("currentLive"), "total": n("total")}
+
+
+def fetch_target_counts(target_id):
+    data = _json(_get(f"{BASE}/{config.RINGBA_ACCOUNT_ID}/targets/{target_id}/Counts", _auth_headers(), retries=3), f"counts of {target_id}")
+    return parse_counts(data, target_id)
 
 
 def test_connection(hours=3):
