@@ -117,7 +117,8 @@ def sync_replies(days=14, scan=300, max_seconds=45):
                     alerts.create_alert("alert_response", f"resp-mail:{aid}:{hashlib.sha1(mid.encode()).hexdigest()[:10]}",
                                         {"responder": who, "choice": "Replied by email", "note": text[:400],
                                          "original_subject": TAG.sub("", a["subject"]).strip(),
-                                         "effect_text": "Saved as a follow-up note on the alert."})
+                                         "effect_text": "Saved as a follow-up note on the alert.",
+                                         "history": alerts.answer_history(aid)}, thread_id=aid, cc_extra=[addr])
                     outcome = "saved"
             db.x("INSERT INTO inbound_emails (message_id, alert_id, from_email, outcome, received_at) VALUES (:m,:a,:f,:o,:n)",
                  m=mid, a=aid, f=addr, o=outcome, n=db.now_utc())

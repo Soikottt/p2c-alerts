@@ -17,12 +17,21 @@ TARGET_PH = [("target", "Target name"), ("buyer", "Buyer name"), ("period", "dai
              ("cap", "Cap size in Ringba"), ("remaining", "Calls left"), ("window_start", "When this cap window started")]
 
 PLACEHOLDERS = {
+    "task_digest": [("date", "Today's date"), ("count", "How many tasks are in the list"),
+                    ("task_list", "The list: overdue, due today, and upcoming reminders")],
     "target_cap": TARGET_PH,
     "new_publisher": [("call_number", "1 for the first call, 2 for the second ..."), ("first_n", "The N in 'first N calls'")] + CALL_PH,
     "lapsed_publisher": [("gap_days", "Days of silence"), ("last_call_time", "Time of the previous call")] + CALL_PH,
     "watchlist_buyer": CALL_PH,
     "publisher_cap": CAP_PH,
     "buyer_cap": CAP_PH,
+    "did_new_no_calls": [("did", "The DID"), ("label", "Your label for it"), ("label_part", "' (label)' or empty"),
+                         ("publisher", "Publisher this DID is assigned to, or 'none'"), ("campaign", "Campaign this DID belongs to"),
+                         ("age_days", "Days since the DID was added"), ("added", "When it was added"),
+                         ("alert_number", "1 for the first alert about this DID, 2 for the second ..."),
+                         ("repeat_days", "How often this alert is repeated (days)"),
+                         ("monthly_cost", "Monthly cost, or 'not set'"), ("next_charge", "Next charge date"),
+                         ("next_step", "What happens if nobody answers")],
     "did_inactive": [("did", "The DID"), ("label", "Your label for it"), ("label_part", "' (label)' or empty"),
                      ("publisher", "Publisher this DID is assigned to in Ringba, or 'none'"),
                      ("campaign", "Campaign this DID belongs to"),
@@ -36,7 +45,8 @@ PLACEHOLDERS = {
     "sync_error": [("error", "The error message")],
     "alert_response": [("responder", "Name of the person who answered"), ("choice", "The option they clicked"),
                        ("note", "Their note"), ("original_subject", "Subject of the original alert"),
-                       ("effect_text", "What the system did automatically")],
+                       ("effect_text", "What the system did automatically"),
+                       ("history", "Every answer / reply / note on this alert so far, with names and times")],
 }
 
 _CALL_BODY = ("- **Time:** {time}\n- **Publisher:** {publisher}\n- **Buyer:** {buyer}\n- **DID (number dialed):** {did}\n"
@@ -53,6 +63,8 @@ DEFAULTS = {
                          "Publisher **{publisher}** just sent a call after **{gap_days} days** of silence (previous call: {last_call_time}).\n\n" + _CALL_BODY),
     "watchlist_buyer": ("Watchlist buyer {buyer} connected a call",
                         "A call **CONNECTED** to watchlist buyer **{buyer}**.\n\n" + _CALL_BODY),
+    "task_digest": ("My tasks for {date} - {count} to do",
+                    "Hello! Your task list for **{date}**.\n\n{task_list}\n\nMark tasks as done in the app (My Tasks tab)."),
     "target_cap": ("TARGET CAP {percent}% ({period}): {target} - {buyer}",
                    "**Target {target}** (buyer **{buyer}**) has used **{percent}%** of its **{period}** cap.\n\n"
                    "- **Usage:** {usage} of {cap} calls (live count from Ringba)\n- **Remaining:** {remaining}\n"
@@ -60,6 +72,11 @@ DEFAULTS = {
                    "**Action:** contact the buyer, or raise the cap in Ringba, before calls are wasted."),
     "publisher_cap": ("CAP {percent}%: {name} ({period}, {metric_label})", _CAP_BODY),
     "buyer_cap": ("CAP {percent}%: {name} ({period}, {metric_label})", _CAP_BODY),
+    "did_new_no_calls": ("New DID {did} - still no calls after {age_days} days (alert #{alert_number})",
+                         "**New DID {did}{label_part}** has **not received any call yet**.\n\n- **Added:** {added} ({age_days} days ago)\n"
+                         "- **Publisher:** {publisher}\n- **Campaign:** {campaign}\n- **Monthly cost:** {monthly_cost}\n- **Next charge:** {next_charge}\n\n"
+                         "**Please check:** is the DID assigned to the right publisher and campaign, and has the publisher started sending traffic? "
+                         "If the owner asked for more time, use the Pause button and type the number of days.\n\n{next_step}"),
     "did_inactive": ("Inactive DID {did} - {idle_days} days without calls",
                      "**DID {did}{label_part}** has had **no calls for {idle_days} days**.\n\n"
                      "- **Publisher:** {publisher}\n- **Campaign:** {campaign}\n- **Last call on this DID:** {last_call}\n"
@@ -73,7 +90,8 @@ DEFAULTS = {
     "sync_error": ("Ringba sync failed", "The engine could not read calls from Ringba.\n\n**Error:** {error}"),
     "alert_response": ("Answer received: {choice} ({original_subject})",
                        "**{responder}** answered an alert.\n\n- **Alert:** {original_subject}\n- **Answer:** {choice}\n"
-                       "- **Note for the team:** {note}\n- **What the system did:** {effect_text}"),
+                       "- **Note for the team:** {note}\n- **What the system did:** {effect_text}\n\n"
+                       "**History of answers on this alert** (a copy goes to the person who answered, so everyone has the same record):\n{history}"),
 }
 
 # Earlier built-in wordings. A saved template that still has EXACTLY one of these is upgraded to the new look.
@@ -86,7 +104,7 @@ OLD_BODIES = {
     'did_inactive': ('**DID {did}{label_part}** has had **no calls for {idle_days} days**.\n\n- **Publisher:** {publisher}\n- **Campaign:** {campaign}\n- **Last call on this DID:** {last_call}\n- **Total calls in the last 30 days:** {calls_30d}\n- **Created in Ringba:** {added}\n- **Next charge:** {next_charge}\n- **Monthly cost:** {monthly_cost}\n- **Last follow-up note:** {last_note}\n\n**Decision needed:** release this DID to avoid the next charge, or keep it for now?', 'DID {did}{label_part} has had no calls for {idle_days} days.\n\nPublisher: {publisher}\nCampaign: {campaign}\nLast call on this DID: {last_call}\nTotal calls in the last 30 days: {calls_30d}\nCreated in Ringba: {added}\nNext charge: {next_charge}\nMonthly cost: {monthly_cost}\nLast follow-up note: {last_note}\n\nDecision needed: release this DID to avoid the next charge, or keep it for now?', 'DID {did}{label_part} has had no calls for {idle_days} days.\nCreated / added: {added}\nLast call: {last_call}\nMonthly cost: {monthly_cost}\n\nDecision needed: release this DID to avoid the monthly charge, or keep it for now?', 'DID {did}{label_part} has had no calls for {idle_days} days.\nPublisher: {publisher}\nCreated in Ringba: {added}\nLast call: {last_call}\nNext charge: {next_charge}\nMonthly cost: {monthly_cost}\n\nDecision needed: release this DID to avoid the next charge, or keep it for now?',),
     'engine_stale': ('The last successful Ringba sync was at {last_sync} ({gap_minutes} minutes ago).\nCalls in that gap are caught up now, but alerts were late. Check GitHub Actions if this repeats.',),
     'sync_error': ('The engine could not read calls from Ringba.\n\nError: {error}',),
-    'alert_response': ('{responder} answered an alert.\n\nAlert: {original_subject}\nAnswer: {choice}\nNote: {note}\n\nWhat the system did: {effect_text}',),
+    'alert_response': ('**{responder}** answered an alert.\n\n- **Alert:** {original_subject}\n- **Answer:** {choice}\n- **Note for the team:** {note}\n- **What the system did:** {effect_text}', '{responder} answered an alert.\n\nAlert: {original_subject}\nAnswer: {choice}\nNote: {note}\n\nWhat the system did: {effect_text}',),
 }
 
 SAMPLE = {
@@ -102,16 +120,23 @@ SAMPLE["publisher_cap"] = {**SAMPLE["cap"], "entity_type": "publisher", "name": 
 SAMPLE["buyer_cap"] = SAMPLE["cap"]
 SAMPLE["target_cap"] = {"target": "Rehab - Best Rehab Co (Texas)", "buyer": "Best Rehab Co", "period": "monthly", "percent": "92", "level": "90",
                         "usage": "460", "cap": "500", "remaining": "40", "window_start": "2026-11-01 12:00 AM EST"}
+SAMPLE["did_new_no_calls"] = {"did": "+16143505599", "label": "", "label_part": "", "publisher": "Acme Media", "campaign": "Rehab", "age_days": "6",
+                              "added": "2026-11-09 10:00 AM EST", "alert_number": "2", "repeat_days": "3", "monthly_cost": "$2.50",
+                              "next_charge": "2026-12-09",
+                              "next_step": "If nobody answers: another alert is sent in 3 days, until this DID gets its first call."}
 SAMPLE["did_inactive"] = {"did": "+16143505503", "label": "Rehab line", "label_part": " (Rehab line)", "publisher": "Acme Media",
                           "campaign": "Rehab", "calls_30d": "0", "last_note": "Mia (Nov 2): publisher paused, will restart next week",
                           "idle_days": "34", "last_call": "2026-10-06 04:41 PM EDT", "added": "2026-06-12 09:30 AM EDT",
                           "next_charge": "2026-11-28", "monthly_cost": "$2.50",
                           "next_step": "If nobody answers this email: a reminder is sent in 3 day(s) (reminder 1 of 3). If you click a 'wait' button, this DID is paused for those days and you get a follow-up email when the pause ends. The alert is never paused for ever."}
+SAMPLE["task_digest"] = {"date": "Mon 16 Nov", "count": "3",
+                         "task_list": "OVERDUE\n- Send invoices (was due Fri 13 Nov)\n\nDUE TODAY\n- Check weekend caps\n  Note: ask Mia about Rehab\n\nREMINDERS (work is later)\n- Prepare buyer report (work on Wed 18 Nov)"}
 SAMPLE["engine_stale"] = {"gap_minutes": "95", "last_sync": "2026-11-09 01:10 PM EST"}
 SAMPLE["sync_error"] = {"error": "HTTP 429: Rate limit exceeded"}
 SAMPLE["alert_response"] = {"responder": "Mia", "choice": "Remove this DID", "note": "Publisher confirmed they stopped",
                             "original_subject": "Inactive DID +16143505503 - 34 days without calls",
-                            "effect_text": "Nothing changed automatically. Your team decides."}
+                            "effect_text": "Nothing changed automatically. Your team decides.",
+                            "history": "- 2026-11-14 03:10 PM EST - Mia <mia@example.com> (answer button): Remove this DID - Publisher confirmed they stopped"}
 
 
 # ---------------------------------------------------------------- formatting (what you type -> a nice email)

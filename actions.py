@@ -10,6 +10,7 @@ import db
 
 EFFECTS = {"record": "Only record the answer (your team decides)",
            "snooze": "Record + pause this alert for N days",
+           "snooze_custom": "Record + pause for the number of days the person types (Days = the suggested number)",
            "retire_did": "Record + mark the DID as retired"}
 
 
@@ -54,13 +55,53 @@ def attach(alert_id, alert_type, body, body_html=None):
     return text, build_html(body_html or plain_to_html(body), links)
 
 
+def _key():
+    import hashlib
+    return hashlib.sha256(f"{config.DB_URL}|{config.SMTP_PASSWORD}|p2c-answer".encode()).digest()
+
+
+def sign(token, email):
+    import hmac
+    return hmac.new(_key(), f"{token}|{email.lower()}".encode(), "sha256").hexdigest()[:20]
+
+
+def personalize(text, html, email):
+    """Give ONE recipient his own copy of the answer links: the link carries his e-mail address (signed, so it cannot be
+    changed by hand). When he clicks, the app already knows who he is: he does not type his name."""
+    import base64
+    import re
+    email = (email or "").strip().lower()
+    r = base64.urlsafe_b64encode(email.encode()).decode().rstrip("=")
+
+    def add(sep):
+        return lambda m: f"{m.group(0)}{sep}r={r}{sep}s={sign(m.group(1), email)}"
+    pat = r"\?a=([\w-]+)"
+    return (re.sub(pat, add("&"), text or ""),
+            re.sub(pat, add("&amp;"), html) if html else html)
+
+
+def identity(token, r, s):
+    """'Name <email>' for a valid personal link, else None (then the page asks for name and email)."""
+    import base64
+    try:
+        email = base64.urlsafe_b64decode(r + "=" * (-len(r) % 4)).decode().lower()
+    except Exception:
+        return None
+    import hmac
+    if not (s and hmac.compare_digest(sign(token, email), s)):
+        return None
+    m = db.q1("SELECT name FROM affiliate_managers WHERE LOWER(email)=:e LIMIT 1", e=email)
+    name = (m["name"] if m else "").strip() or email.split("@")[0].replace(".", " ").replace("_", " ").title()
+    return f"{name} <{email}>"
+
+
 def lookup(token):
     return db.q1("""SELECT a.token, a.alert_id, a.label, a.effect, a.effect_days, al.subject AS alert_subject,
                            al.snooze_key, al.response_label, al.responded_by, al.responded_at
                     FROM alert_actions a JOIN alerts al ON al.id = a.alert_id WHERE a.token = :t""", t=token)
 
 
-def respond(token, who, note):
+def respond(token, who, note, days=None):
     """Save the answer. First answer wins. Returns {'ok': bool, 'msg': str}."""
     import alerts
     row = lookup(token)
@@ -70,6 +111,13 @@ def respond(token, who, note):
         return {"ok": False, "msg": f"This alert was already answered: '{row['response_label']}'"
                                     f"{' by ' + row['responded_by'] if row['responded_by'] else ''}."}
     now = db.now_utc()
+    if row["effect"] == "snooze_custom":        # the person typed how many days to pause
+        try:
+            days = int(days if days is not None else row["effect_days"] or 7)
+        except (TypeError, ValueError):
+            days = int(row["effect_days"] or 7)
+        days = min(max(days, 1), 365)
+        row = {**row, "effect": "snooze", "effect_days": days, "label": f"{row['label']} ({days} days)"}
     n = db.x("UPDATE alerts SET response_label=:l, responded_at=:n, responded_by=:w, response_note=:note "
              "WHERE id=:i AND response_label IS NULL", l=row["label"], n=now, w=(who or "").strip() or None,
              note=(note or "").strip() or None, i=row["alert_id"])
@@ -90,6 +138,9 @@ def respond(token, who, note):
         db.x("UPDATE dids SET status='retired' WHERE id=:i", i=int(key.split(":")[1]))
         effect_text = "The DID was marked as retired (no more alerts for it)."
     ctx = {"responder": (who or "").strip() or "Someone", "choice": row["label"],
-           "note": (note or "").strip() or "-", "original_subject": row["alert_subject"], "effect_text": effect_text}
-    alerts.create_alert("alert_response", f"resp:{row['alert_id']}", ctx)
+           "note": (note or "").strip() or "-", "original_subject": row["alert_subject"], "effect_text": effect_text,
+           "history": alerts.answer_history(row["alert_id"])}
+    from email.utils import parseaddr
+    alerts.create_alert("alert_response", f"resp:{row['alert_id']}", ctx, thread_id=row["alert_id"],
+                        cc_extra=[parseaddr(who or "")[1]])       # the person who answered gets his own answer + history by e-mail
     return {"ok": True, "msg": f"Thank you. Your answer '{row['label']}' was saved and the team was notified."}

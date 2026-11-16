@@ -19,6 +19,7 @@ import inbox
 import ingest
 import mailer
 import rules
+import pubcaps
 import targets
 import setup_db
 import ringba_client as rc
@@ -158,6 +159,22 @@ def run_once(log=_emit, time_limit=None):
             rc.set_deadline(None)
     else:
         say("target caps: skipped (this run is short of time)")
+
+    # ---- 2c. publisher caps per campaign from the Ringba campaigns' payout rules (optional, at most ~60 s, once an hour)
+    if elapsed() < limit - 110:
+        step("reading publisher caps from the Ringba campaigns")
+        rc.set_deadline(60)
+        try:
+            r = pubcaps.run()
+            if r:
+                say(f"publisher caps: {r['campaigns']} campaigns, {r['with_caps']} publisher caps found, {r['added']} new, {r['updated']} changed, "
+                    f"{r['removed']} removed" + (f", {len(r['unmatched'])} publishers not known yet" if r["unmatched"] else ""))
+        except Exception as e:
+            say(f"publisher caps FAILED (will retry in 30 min): {e}")
+        finally:
+            rc.set_deadline(None)
+    else:
+        say("publisher caps: skipped (this run is short of time)")
 
     # ---- 3. email replies (optional)
     if elapsed() < limit - 90:

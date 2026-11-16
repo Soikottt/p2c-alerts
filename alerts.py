@@ -105,7 +105,7 @@ def existing_keys(keys):
 
 
 def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=None, status="pending",
-                 snooze_key=None, subject=None, body=None, subject_tag=""):
+                 snooze_key=None, subject=None, body=None, subject_tag="", thread_id=None, cc_extra=None):
     """Queue one email. Returns True if it was new (the same dedupe_key is never queued twice).
     The wording comes from the alert's template; ctx fills the {placeholders}."""
     import actions
@@ -120,27 +120,52 @@ def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=N
     body_html = None
     if subject is None:
         subj_t, body_t = templates.get_template(alert_type, rule)
+        if ctx and ctx.get("history") and "{history}" not in body_t:
+            body_t = body_t + "\n\nHistory of answers on this alert:\n{history}"
         if ctx and ctx.get("next_step") and "{next_step}" not in body_t:
             body_t = body_t + "\n\n{next_step}"        # a template you edited earlier still gets the 'if nobody answers' note
         subject = subject_tag + templates.render(subj_t, ctx)
         body, body_html = templates.render_body(body_t, ctx)      # plain text + formatted HTML version
     to, cc = build_recipients(rule, publisher_id, buyer_id)
+    seen = {e.lower() for e in to} | {e.lower() for e in cc}
+    for e in parse_emails(", ".join(cc_extra or [])):     # e.g. the person who answered gets a copy of his own answer
+        if e.lower() not in seen:
+            seen.add(e.lower()); cc.append(e)
+    parent = db.q1("SELECT subject FROM alerts WHERE id=:i", i=int(thread_id)) if thread_id else None
+    if not parent:
+        thread_id = None
     prefix = db.get_setting("subject_prefix", "[P2C Alert]")
     rows = db.q("""INSERT INTO alerts (alert_type, dedupe_key, subject, body, to_emails, cc_emails, status, attempts,
-                                       created_at, snooze_key)
-                   VALUES (:t,:k,:s,:b,:to,:cc,:st,0,:now,:sk) ON CONFLICT (dedupe_key) DO NOTHING RETURNING id""",
+                                       created_at, snooze_key, thread_id)
+                   VALUES (:t,:k,:s,:b,:to,:cc,:st,0,:now,:sk,:th) ON CONFLICT (dedupe_key) DO NOTHING RETURNING id""",
                 t=alert_type, k=dedupe_key, s=f"{prefix} {subject}".strip(), b=body, to=", ".join(to),
-                cc=", ".join(cc), st=status, now=db.now_utc(), sk=snooze_key)
+                cc=", ".join(cc), st=status, now=db.now_utc(), sk=snooze_key, th=thread_id)
     if not rows:
         return False
     if status == "skipped":
         return True
     alert_id = rows[0]["id"]
-    full_subject = f"{prefix} {subject}".strip() + f" [#A{alert_id}]"     # replies keep this tag, so they can be matched
+    if thread_id:       # an answer to an alert: same subject as the alert ("Re: ..."), so mail programs show ONE conversation
+        base = parent["subject"]
+        full_subject = base if base.lower().startswith("re:") else "Re: " + base
+    else:
+        full_subject = f"{prefix} {subject}".strip() + f" [#A{alert_id}]"     # replies keep this tag, so they can be matched
     text, html = (actions.attach(alert_id, alert_type, body, body_html) if status == "pending" else (body, body_html))
     db.x("UPDATE alerts SET subject=:s, body=:b, body_html=:h WHERE id=:i", s=full_subject, b=text, h=html, i=alert_id)
     _budget["created"] += 1
     return True
+
+
+def answer_history(alert_id):
+    """Everything answered on this alert so far (button answers, e-mail replies, team notes), oldest first. Plain text lines."""
+    import cases
+    from timeutil import fmt
+    lines = []
+    for n in cases.timeline(alert_id):
+        who = n["author"] or "someone"
+        how = {"answer": "answer button", "email": "e-mail reply", "team": "team note"}.get(n["source"], n["source"])
+        lines.append(f"- {fmt(n['created_at'])} - {who} ({how}): " + " ".join((n["text"] or "").split())[:400])
+    return "\n".join(lines) or "- (nothing yet)"
 
 
 def delete_alerts(ids, also_resume_pauses=True):

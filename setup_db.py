@@ -24,8 +24,13 @@ RULE_SEEDS = [
      "Buyer reached a % of its cap. Percentages are set per cap on the Caps tab."),
     ("did_inactive", "Inactive DID", True, 30, None, True, False, True,
      "A DID had no calls for N days (counted from its last call, or from the day it was added). N = 'Days'."),
+    ("did_new_no_calls", "New DID with no calls yet", True, 3, 30, True, False, True,
+     "A recently added DID that never got a call. Repeated every N days until the first call arrives. N = 'Days'. "
+     "A DID counts as new for 'Count' days after it was added (0 = no limit); after that the normal Inactive DID alert takes over."),
     ("target_cap", "Buyer target cap warning", True, None, None, False, True, True,
      "A buyer target reached a % of its daily or monthly cap. Caps and live usage are read from Ringba automatically."),
+    ("task_digest", "My daily task list", True, None, None, False, False, False,
+     "Your own task list, emailed once a day at the time you choose (My Tasks tab). Goes to the admin e-mail address(es)."),
     ("engine_stale", "Alert engine was offline", True, None, 45, False, False, False,
      "The 5-minute engine did not run for N minutes. N = 'Count' (minutes)."),
     ("sync_error", "Ringba sync failed", True, None, None, False, False, False,
@@ -47,6 +52,9 @@ ACTION_SEEDS = [
     ("publisher_cap", "Pause this publisher", "record", None),
     ("buyer_cap", "I will contact the buyer", "snooze", 1),
     ("buyer_cap", "Cap will be increased in Ringba", "record", None),
+    ("did_new_no_calls", "Pause - the owner asked for more time (you type the days)", "snooze_custom", 7),
+    ("did_new_no_calls", "I will contact the publisher first", "snooze", 3),
+    ("did_new_no_calls", "Remove this DID", "record", None),
     ("target_cap", "I will contact the buyer", "snooze", 1),
     ("target_cap", "Cap will be increased in Ringba", "record", None),
     ("target_cap", "Target will be paused", "record", None),
@@ -56,6 +64,9 @@ ACTION_SEEDS = [
 ADD_COLUMNS = [
     ("alert_rules", "template_id", "INTEGER"),
     ("alerts", "body_html", "TEXT"),
+    ("caps", "source", "TEXT"),
+    ("caps", "ringba_key", "TEXT"),
+    ("alerts", "thread_id", "INTEGER"),
     ("alerts", "snooze_key", "TEXT"),
     ("alerts", "response_label", "TEXT"),
     ("alerts", "responded_at", "TIMESTAMPTZ"),
@@ -168,6 +179,10 @@ def ensure_columns():
         db.q1("SELECT never_alert FROM dids LIMIT 1")
         db.q1("SELECT campaign_name FROM caps LIMIT 1")
         db.q1("SELECT ringba_target_id FROM targets LIMIT 1")
+        db.q1("SELECT thread_id FROM alerts LIMIT 1")
+        db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
+        db.q1("SELECT title FROM tasks LIMIT 1")
+        db.q1("SELECT event FROM task_log LIMIT 1")
         return False
     except Exception:
         run(log=lambda m: None, migrate=False)          # safe to repeat: every step is 'IF NOT EXISTS' / 'ON CONFLICT DO NOTHING'

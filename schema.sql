@@ -135,7 +135,8 @@ CREATE TABLE IF NOT EXISTS alerts (
   responded_by TEXT,
   response_note TEXT,
   case_status TEXT DEFAULT 'open',
-  case_updated_at TIMESTAMPTZ
+  case_updated_at TIMESTAMPTZ,
+  thread_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_alerts_status ON alerts (status);
 CREATE INDEX IF NOT EXISTS ix_alerts_created ON alerts (created_at);
@@ -231,4 +232,26 @@ CREATE TABLE IF NOT EXISTS targets (
   count_month INTEGER,
   counts_at TIMESTAMPTZ,
   synced_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  notes TEXT,
+  work_date TEXT,
+  alert_date TEXT,
+  repeat TEXT NOT NULL DEFAULT 'none',
+  status TEXT NOT NULL DEFAULT 'open',
+  done_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS task_log (
+  id SERIAL PRIMARY KEY,
+  task_id INTEGER,
+  task_title TEXT,
+  at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  event TEXT NOT NULL,
+  detail TEXT
 );

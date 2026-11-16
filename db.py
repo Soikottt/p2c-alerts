@@ -31,6 +31,11 @@ SETTING_DEFAULTS = {
     "inbox_last_error": "",        # (internal)
     "inbox_next_run": "",          # (internal) after a failure, wait 30 minutes
     "did_reminder_days": "3",      # nobody answered an inactive-DID email: remind again after N days (0 = never remind)
+    "pubcaps_sync_minutes": "60",  # how often publisher caps are re-read from the Ringba campaigns
+    "tasks_digest_on": "true",     # My Tasks: e-mail the daily list
+    "tasks_send_time": "08:00",    # ... at this time (in tasks_timezone)
+    "tasks_timezone": "Asia/Dhaka",
+    "tasks_weekends": "false",     # also send on Saturday / Sunday
     "did_reminder_max": "3",       # at most this many reminders per DID alert
     "targets_sync_minutes": "60",  # how often the buyer targets and their caps are re-read from Ringba (usage is read every run)
     "targets_next_run": "",        # (internal)

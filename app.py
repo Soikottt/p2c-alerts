@@ -50,16 +50,28 @@ def action_page(token):
         return
     st.subheader(row["alert_subject"])
     st.markdown(f"Your answer: **{row['label']}**")
+    known = actions.identity(token, st.query_params.get("r", ""), st.query_params.get("s", ""))
     with st.form("answer_form"):
-        who = st.text_input("Your name", key="ans_who")
-        mail = st.text_input("Your email address", key="ans_mail", help="So the team can see exactly who answered.")
+        if known:
+            st.markdown(f"Answering as **{known}**")        # personal link from the email: nothing to type
+            who = mail = ""
+        else:
+            who = st.text_input("Your name", key="ans_who")
+            mail = st.text_input("Your email address", key="ans_mail", help="So the team can see exactly who answered.")
+        days = None
+        if row["effect"] == "snooze_custom":
+            days = st.number_input("Pause this alert for how many days?", 1, 365, int(row["effect_days"] or 7), key="ans_days",
+                                   help="For example the number of days the DID owner asked for.")
         note = st.text_area("Note for the team (optional)", key="ans_note")
         go = st.form_submit_button("✅ Confirm my answer")
-    if go:
+    if go and known:
+        res = actions.respond(token, known, note, days)
+        (st.success if res["ok"] else st.error)(res["msg"])
+    elif go:
         if not who.strip() or not alerts.EMAIL_RE.match(mail.strip()):
             st.error("Please type your name and a valid email address, then confirm again.")
         else:
-            res = actions.respond(token, f"{who.strip()} <{mail.strip().lower()}>", note)
+            res = actions.respond(token, f"{who.strip()} <{mail.strip().lower()}>", note, days)
             (st.success if res["ok"] else st.error)(res["msg"])
 
 
@@ -95,6 +107,9 @@ def schema_ready():
         db.q1("SELECT never_alert FROM dids LIMIT 1")
         db.q1("SELECT campaign_name FROM caps LIMIT 1")
         db.q1("SELECT ringba_target_id FROM targets LIMIT 1")
+        db.q1("SELECT thread_id FROM alerts LIMIT 1")
+        db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
+        db.q1("SELECT title FROM tasks LIMIT 1")
         return True
     except Exception:
         return False
@@ -733,7 +748,7 @@ def page_dids():
         else:
             pick = st.selectbox("DID", sorted(nums), key="did_hist_pick")
             did_id = nums[pick]
-            hist = db.q("SELECT id, created_at, subject, status, case_status FROM alerts WHERE alert_type='did_inactive' "
+            hist = db.q("SELECT id, created_at, subject, status, case_status FROM alerts WHERE alert_type IN ('did_inactive','did_new_no_calls') "
                         "AND snooze_key=:k AND status<>'skipped' ORDER BY id DESC", k=f"did:{did_id}")
             if not hist:
                 st.caption("No inactive-DID alert has been created for this DID yet.")
@@ -800,7 +815,7 @@ def caps_section(entity_type, default_metric):
     campaigns = [ALL] + [r["campaign_name"] for r in db.q(
         "SELECT DISTINCT campaign_name FROM calls WHERE campaign_name IS NOT NULL AND call_at >= :s ORDER BY campaign_name",
         s=db.now_utc() - timedelta(days=120))]
-    rows = db.q(f"""SELECT c.id, c.entity_id, e.name AS name, c.campaign_name, c.period, c.metric, c.cap_value, c.thresholds, c.active, c.notes
+    rows = db.q(f"""SELECT c.id, c.entity_id, e.name AS name, c.campaign_name, c.period, c.metric, c.cap_value, c.thresholds, c.active, c.notes, c.source
                     FROM caps c JOIN {table} e ON e.id = c.entity_id WHERE c.entity_type = :t ORDER BY e.name, c.campaign_name""", t=entity_type)
     now = db.now_utc()
     for r in rows:
@@ -808,9 +823,10 @@ def caps_section(entity_type, default_metric):
                              "metric": r["metric"], "cap_value": r["cap_value"], "campaign_name": r["campaign_name"]}, now)
         r["used_now"], r["percent_now"] = u["usage"], round(u["pct"], 1)
         r["campaign"] = r["campaign_name"] or ALL
+        r["from_"] = "Ringba" if r["source"] == "ringba" else "typed by you"
         if r["campaign_name"] and r["campaign_name"] not in campaigns:
             campaigns.append(r["campaign_name"])           # a campaign with no recent calls must stay selectable
-    cols = ["id", "name"] + (["campaign"] if by_campaign else []) + ["period", "metric", "cap_value", "thresholds", "active", "notes", "used_now", "percent_now"]
+    cols = ["id", "name"] + (["campaign"] if by_campaign else []) + ["period", "metric", "cap_value", "thresholds", "active", "notes", "used_now", "percent_now"] + (["from_"] if by_campaign else [])
     df = frame(rows, cols)
     df["active"] = df["active"].fillna(True).astype(bool)
     editable = ["name"] + (["campaign"] if by_campaign else []) + ["period", "metric", "cap_value", "thresholds", "active", "notes"]
@@ -841,9 +857,38 @@ def caps_section(entity_type, default_metric):
            "active": st.column_config.CheckboxColumn("Active"),
            "notes": st.column_config.TextColumn("Notes"),
            "used_now": st.column_config.NumberColumn("Used now"),
+           "from_": st.column_config.TextColumn("Cap from", help="Ringba = read automatically (it is updated on every read). typed by you = never changed by Ringba."),
            "percent_now": st.column_config.NumberColumn("% now")}
     table_editor(f"cap_{entity_type}", df, cfg, editable, "caps", tf, required=("name", "cap_value"), allow_delete=True,
-                 disabled=["used_now", "percent_now"])
+                 disabled=["used_now", "percent_now"] + (["from_"] if by_campaign else []))
+
+
+def pubcaps_section():
+    import pubcaps
+    st.caption("Read from Ringba by itself: the **daily** and **monthly** cap of every publisher in every campaign (from the campaign's payout rules; "
+               "a publisher without its own payout rule uses the campaign's default payout). Re-read every "
+               f"{int(float(db.get_setting('pubcaps_sync_minutes') or 60))} minutes. Usage is counted from your own call data (PAID calls). "
+               "A cap you type below for the same publisher + campaign + period is never replaced by Ringba.")
+    flash("flash_pubcaps")
+    ok_t, err = db.get_setting("pubcaps_last_ok", ""), db.get_setting("pubcaps_last_error", "")
+    c1, c2 = st.columns([1, 3])
+    if c1.button("🔄 Read publisher caps from Ringba now", key="pc_sync"):
+        try:
+            rc.set_deadline(120)
+            r = pubcaps.run(force=True)
+            msg = (f"Ringba has {r['campaigns']} campaigns with {r['with_caps']} publisher caps: {r['added']} new, {r['updated']} changed, "
+                   f"{r['removed']} removed, {r['skipped_manual']} skipped (you typed your own).")
+            if r["unmatched"]:
+                msg += " Publishers not in this tool yet (they appear after their first call): " + ", ".join(r["unmatched"][:15])
+            if not r["with_caps"]:
+                msg += f" No cap found. Campaign fields Ringba returned: {', '.join(r['report']['campaign_keys'])}. Publisher fields: {', '.join(r['report']['affiliate_keys'])}."
+            set_flash("flash_pubcaps", "ok" if r["with_caps"] else "err", msg)
+        except Exception as e:
+            set_flash("flash_pubcaps", "err", f"Could not read publisher caps: {e}")
+        finally:
+            rc.set_deadline(None)
+        st.rerun()
+    c2.caption((f"Last successful read: {ago(ok_t)}. " if ok_t else "Not read yet. ") + (f"Last problem: {err}" if err else ""))
 
 
 def targets_section():
@@ -904,10 +949,11 @@ def page_caps():
                f"(default 00:00, i.e. the day ends at 11:59 PM). Monthly caps reset on the 1st. Remove a row to delete a cap.")
     st.subheader("🎯 Buyer target caps (automatic from Ringba)")
     targets_section()
-    st.subheader("🧑‍💼 Publisher caps (per campaign)")
-    st.caption("Ringba has no cap data for publishers, so type these in. Pick the **campaign** when the publisher has a different cap on each "
-               "campaign (one row per campaign). Usage is counted from your own call data. Default: counts CONVERTED calls.")
-    caps_section("publisher", "converted")
+    st.subheader("🧑‍💼 Publisher caps per campaign (automatic from Ringba)")
+    pubcaps_section()
+    st.caption("You can also type a cap yourself (one row per campaign). Rows marked 'Ringba' are filled in automatically; you can change the "
+               "alert levels, the Active tick and the notes, but the cap size itself follows Ringba.")
+    caps_section("publisher", "paid")
     st.subheader("🏢 Buyer caps (manual, whole buyer)")
     st.caption("Only for a cap on the buyer as a whole. For caps on a buyer's targets use the automatic section above. Default: counts PAID calls.")
     caps_section("buyer", "paid")
@@ -1121,9 +1167,9 @@ def page_templates():
     def tf(v):
         eff = v["effect"] or "record"
         days = None if v["effect_days"] is None else int(v["effect_days"])
-        if eff == "snooze" and not days:
-            raise ValueError("'snooze' needs the number of Days")
-        if eff == "retire_did" and atype != "did_inactive":
+        if eff in ("snooze", "snooze_custom") and not days:
+            raise ValueError(f"'{eff}' needs the number of Days (for snooze_custom it is the suggested number)")
+        if eff == "retire_did" and atype not in ("did_inactive", "did_new_no_calls"):
             raise ValueError("'retire_did' only works for Inactive DID alerts")
         return {"label": v["label"], "effect": eff, "effect_days": days, "active": bool(v["active"]),
                 "sort_order": int(v["sort_order"] or 0)}
@@ -1470,8 +1516,118 @@ def page_settings():
 
 
 # ================================================================== navigation: only the chosen page is loaded (fast)
+def page_tasks():
+    import tasks
+    flash("flash_tasks")
+    td = tasks.today()
+    st.caption(f"Your own to-do list. Today (your time zone) is {td:%A %d %b %Y}. A task shows up in your daily e-mail when its "
+               "**alert date** or **work date** has come, and stays there until you tick it as done.")
+    with st.form("task_add", clear_on_submit=True):
+        title = st.text_input("Task (what to do)", key="task_title")
+        c1, c2, c3 = st.columns(3)
+        wd = c1.date_input("Work date (do it on)", td, key="task_wd")
+        ad = c2.date_input("Alert date (remind me on)", td, key="task_ad", help="Can be earlier than the work date. The reminder comes in your daily e-mail.")
+        rep = c3.selectbox("Repeat", tasks.REPEATS, format_func=lambda r: tasks.REPEAT_LABEL[r], key="task_rep",
+                           help="A repeating task moves to its next date when you tick Done.")
+        notes = st.text_area("Note (optional)", key="task_notes", height=70)
+        if st.form_submit_button("➕ Add task"):
+            try:
+                tasks.add_task(title, notes, wd, ad, rep)
+                set_flash("flash_tasks", "ok", "Task added.")
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+    rows = tasks.open_tasks()
+    st.subheader(f"To do ({len(rows)})")
+    if not rows:
+        st.info("Nothing open. Add your first task above.")
+    else:
+        icon = {"Overdue": "🔴 Overdue", "Today": "🟠 Today", "Reminder": "🔔 Reminder", "Later": "⚪ Later"}
+        df = pd.DataFrame([{"id": r["id"], "Done": False, "Status": icon[tasks.status_of(r, td)], "Task": r["title"],
+                            "Work date": tasks.pdate(r["work_date"]), "Alert date": tasks.pdate(r["alert_date"]),
+                            "Repeat": r["repeat"], "Note": r["notes"] or "", "Remove": False} for r in rows])
+        ed = st.data_editor(df, hide_index=True, use_container_width=True, key="task_editor", disabled=["id", "Status"],
+                            column_order=["Done", "Status", "Task", "Work date", "Alert date", "Repeat", "Note", "Remove"],
+                            column_config={"id": None,
+                                           "Done": st.column_config.CheckboxColumn("Done", width="small"),
+                                           "Work date": st.column_config.DateColumn("Work date", format="YYYY-MM-DD"),
+                                           "Alert date": st.column_config.DateColumn("Alert date", format="YYYY-MM-DD"),
+                                           "Repeat": st.column_config.SelectboxColumn("Repeat", options=tasks.REPEATS, required=True),
+                                           "Remove": st.column_config.CheckboxColumn("Remove", width="small", help="Deletes the task (the history stays)")})
+        if st.button("💾 Save changes", type="primary", key="task_save"):
+            done = changed = removed = 0
+            for i in range(len(df)):
+                o, n = df.iloc[i], ed.iloc[i]
+                tid = int(o["id"])
+                if n["Remove"]:
+                    tasks.delete_task(tid); removed += 1
+                    continue
+                if tasks.update_task(tid, title=n["Task"], notes=n["Note"], work_date=n["Work date"] if pd.notna(n["Work date"]) else None,
+                                     alert_date=n["Alert date"] if pd.notna(n["Alert date"]) else None, repeat=n["Repeat"]):
+                    changed += 1
+                if n["Done"]:
+                    tasks.mark_done(tid); done += 1
+            set_flash("flash_tasks", "ok", f"Saved. Done: {done}, changed: {changed}, removed: {removed}.")
+            st.rerun()
+
+    with st.expander("✅ Done recently (tick Reopen to bring a task back)"):
+        dn = db.q("SELECT id, title, done_at FROM tasks WHERE status='done' ORDER BY done_at DESC LIMIT 30")
+        if dn:
+            ddf = pd.DataFrame([{"id": r["id"], "Reopen": False, "Task": r["title"],
+                                 "Done at": fmt(r["done_at"]) if r["done_at"] else ""} for r in dn])
+            ded = st.data_editor(ddf, hide_index=True, use_container_width=True, key="task_done_editor", disabled=["id", "Task", "Done at"],
+                                 column_config={"id": None})
+            if st.button("Reopen ticked tasks", key="task_reopen"):
+                for i in range(len(ddf)):
+                    if ded.iloc[i]["Reopen"]:
+                        tasks.reopen(int(ddf.iloc[i]["id"]))
+                st.rerun()
+        else:
+            st.write("No finished tasks yet.")
+
+    with st.expander("🕘 History (when tasks were created, changed or done)"):
+        lg = db.q("SELECT at, task_title, event, detail FROM task_log ORDER BY id DESC LIMIT 200")
+        st.dataframe(frame([{"When": fmt(r["at"]), "Task": r["task_title"], "What happened": r["event"], "Details": r["detail"]} for r in lg],
+                           ["When", "Task", "What happened", "Details"]), hide_index=True, use_container_width=True)
+
+    with st.expander("⏰ Daily e-mail settings"):
+        with st.form("task_settings"):
+            c1, c2 = st.columns(2)
+            on = c1.checkbox("Send my task list every day", value=str(db.get_setting("tasks_digest_on", "true")).lower() == "true", key="tk_on")
+            wk = c2.checkbox("Also on Saturday and Sunday", value=str(db.get_setting("tasks_weekends", "false")).lower() == "true", key="tk_wk")
+            tm = c1.text_input("Send time (HH:MM)", db.get_setting("tasks_send_time", "08:00"), key="tk_time",
+                               help="The list goes out at the first engine run after this time (the engine runs every 5 minutes).")
+            tzn = c2.text_input("Your time zone", db.get_setting("tasks_timezone", "Asia/Dhaka"), key="tk_tz")
+            if st.form_submit_button("💾 Save"):
+                try:
+                    ZoneInfo(tzn)
+                    hh, mm = tm.split(":")
+                    assert 0 <= int(hh) < 24 and 0 <= int(mm) < 60
+                except Exception:
+                    st.error("Time zone must look like Asia/Dhaka and the time like 08:00.")
+                else:
+                    db.set_setting("tasks_digest_on", "true" if on else "false")
+                    db.set_setting("tasks_weekends", "true" if wk else "false")
+                    db.set_setting("tasks_send_time", f"{int(hh):02d}:{int(mm):02d}")
+                    db.set_setting("tasks_timezone", tzn)
+                    set_flash("flash_tasks", "ok", "Saved.")
+                    st.rerun()
+        st.caption("The e-mail goes to the admin e-mail address(es) in Settings. You can edit its wording on the Email templates tab (\"My daily task list\").")
+        text, count = tasks.digest_text(td)
+        if st.button("📧 Send me the list now", key="task_now"):
+            if not count:
+                st.info("Nothing to send: no task has reached its alert date or work date yet.")
+            elif tasks.run_digest(force=True):
+                st.success("Queued. It is sent by the next engine run (within about 5 minutes).")
+            else:
+                st.warning("Could not queue it. Check that the rule \"My daily task list\" is switched on in the Emails tab.")
+        if count:
+            st.text(text)
+
+
 PAGES = {"📊 Dashboard": page_dashboard, "📑 Reports": page_reports, "🧑‍💼 Publishers": page_publishers,
-         "🏢 Buyers": page_buyers, "📞 DIDs": page_dids, "🚦 Caps": page_caps, "✉️ Emails": page_emails,
+         "🏢 Buyers": page_buyers, "📞 DIDs": page_dids, "🚦 Caps": page_caps, "✅ My Tasks": page_tasks, "✉️ Emails": page_emails,
          "📝 Email templates": page_templates, "📜 Alert Log": page_log, "🔄 Sync & Import": page_sync,
          "⚙️ Settings": page_settings}
 

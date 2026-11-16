@@ -303,6 +303,64 @@ def rule_inactive_dids(now):
     return made
 
 
+def rule_new_dids_no_calls(now):
+    """A recently added DID that never got a call: alert after N days, then again every N days, until its first call.
+    A pause (answer button, any number of days) stops it; when the pause ends the alert comes back. Never-alert DIDs are skipped."""
+    rule = alerts.get_rule("did_new_no_calls")
+    if not rule or not rule["enabled"]:
+        return 0
+    every = max(int(rule["param_days"] or 3), 1)
+    window = int(rule["param_count"] or 0)          # a DID is 'new' for this many days after it was added (0 = always)
+    sql = ("SELECT d.* FROM dids d WHERE d.status='active' AND COALESCE(d.never_alert, FALSE)=FALSE AND d.last_call_at IS NULL "
+           "AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.did_id = d.id)")
+    p = {}
+    if window > 0:
+        sql += " AND d.added_at >= :since"
+        p["since"] = now - timedelta(days=window)
+    db.x("UPDATE alerts SET status='skipped' WHERE status='pending' AND alert_type='did_new_no_calls' AND snooze_key IN "
+         "(SELECT 'did:' || CAST(id AS TEXT) FROM dids WHERE never_alert = TRUE OR last_call_at IS NOT NULL)")
+    cands = [(d, to_dt(d["added_at"])) for d in db.q(sql, **p)]
+    cands = [(d, a) for d, a in cands if a and (now - a) >= timedelta(days=every)]
+    if not cands:
+        return 0
+    last = {}      # did id -> (number of alerts so far, time of the newest, is it still waiting to be sent)
+    for a in db.q("SELECT dedupe_key, status, created_at, sent_at FROM alerts WHERE alert_type='did_new_no_calls' "
+                  "AND status <> 'skipped' AND dedupe_key LIKE 'newdid:%' ORDER BY id"):
+        did = a["dedupe_key"].split(":")[1]
+        n = last.get(did, (0,))[0] + 1
+        last[did] = (n, to_dt(a["sent_at"] or a["created_at"]), a["status"] == "pending")
+    snoozes = {r["entity_key"]: to_dt(r["snooze_until"]) for r in db.q("SELECT entity_key, snooze_until FROM snoozes WHERE entity_key LIKE 'did:%'")}
+    import dids as didtools
+    pub = {x["id"]: x["name"] for x in db.q("SELECT id, name FROM publishers")}
+    camp = didtools.campaign_names([d for d, _ in cands])
+    made = 0
+    for d, added in cands:
+        n, when, waiting = last.get(str(d["id"]), (0, None, False))
+        if waiting:
+            continue
+        until = snoozes.get(f"did:{d['id']}")
+        if until and until > now:
+            continue                                   # paused (maybe the DID owner asked for time)
+        if when and now - when < timedelta(days=every):
+            continue
+        ctx = {"did": d["number"], "label": d["label"] or "", "label_part": f" ({d['label']})" if d["label"] else "",
+               "age_days": (now - added).days, "added": fmt(d["added_at"]), "alert_number": n + 1, "repeat_days": every,
+               "publisher": pub.get(d["publisher_id"]) or d["affiliate_name"] or "none", "campaign": camp.get(d["id"]) or "unknown",
+               "monthly_cost": f"${float(d['monthly_cost']):.2f}" if d["monthly_cost"] is not None else "not set",
+               "next_charge": fmt(d["next_charge_at"], False) if d["next_charge_at"] else "unknown",
+               "next_step": (f"If nobody answers this email: another alert is sent in {every} day(s), until this DID gets its first call. "
+                             f"If you click Pause, nothing is sent for the days you choose, then the alerts continue.")}
+        if alerts.create_alert("did_new_no_calls", f"newdid:{d['id']}:{n + 1}", ctx, publisher_id=d["publisher_id"],
+                               snooze_key=f"did:{d['id']}", subject_tag="REMINDER: " if n else ""):
+            made += 1
+    return made
+
+
+def rule_task_digest(now):
+    import tasks
+    return tasks.run_digest(now)
+
+
 def run_all(now=None, log=None, max_new=None, seconds=None):
     """Every rule once. `max_new` / `seconds` limit how many alerts one run may create (the rest comes next run)."""
     import time
@@ -311,7 +369,7 @@ def run_all(now=None, log=None, max_new=None, seconds=None):
     alerts.set_budget(max_new, seconds)
     try:
         for name, fn in [("publishers", rule_new_and_lapsed_publisher), ("watchlist", rule_watchlist_buyer),
-                         ("caps", rule_caps), ("targets", rule_target_caps), ("dids", rule_inactive_dids)]:
+                         ("caps", rule_caps), ("targets", rule_target_caps), ("dids", rule_inactive_dids), ("new dids", rule_new_dids_no_calls), ("tasks", rule_task_digest)]:
             t0 = time.monotonic()
             out[name] = fn(now)
             if log:

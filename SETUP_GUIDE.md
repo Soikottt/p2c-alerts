@@ -404,3 +404,46 @@ Compare again after that. If numbers still differ, send one publisher's call-lev
 
 ### Tables: column order and width
 Every table has **Arrange columns / column width**: move a column to any position and set its width in pixels. Both are saved per table.
+
+### My Tasks (your own daily to-do list)
+Open the **✅ My Tasks** tab.
+1. Type the task, pick the **work date** (do it on) and the **alert date** (remind me on; it can be earlier). Add a note if you want. Press **Add task**.
+2. Every day at your send time (default 08:00 Dhaka time) you get ONE email with your list: 🔴 overdue, 🟠 due today, 🔔 reminders for work that comes later. Nothing is sent if the list is empty.
+3. Tick **Done** in the table and press **Save changes**. The time is saved. You can also edit any field in the table, or tick **Remove**.
+4. **Repeat** (every day / weekday / week / month): when you tick Done, the task moves to its next date by itself.
+5. **History** shows when each task was created, changed or finished. **Done recently** lets you reopen a task.
+6. Time, time zone, weekends on/off: *Daily e-mail settings* on the same tab. The email goes to the admin addresses in Settings. Wording: Email templates tab, "My daily task list".
+7. The email is sent by the 5-minute engine, so it arrives within 5 minutes after your send time. Use *Send me the list now* to test (needs DRY RUN off to really send).
+The first time you open the app after the update, press the "Set up / upgrade the database" button if it shows up. The engine also does it by itself.
+
+### Answers stay in the same email thread
+When someone clicks an answer button, or replies by email, the "Answer received" email to you is now sent as a reply in the SAME conversation as the alert ("Re: ..." with the same subject). In Gmail / Outlook both emails show as one thread. Alerts sent BEFORE this update are matched by subject, so they usually join too.
+
+### The person who answers gets a copy (proof of what he said)
+When an affiliate manager clicks an answer button or replies by email, the "Answer received" email now goes to you AND to that person (CC), in the same thread. It lists the full history of answers on that alert: who, how (button / email reply), when, and what was written. So nobody can say later "I never said that". To change the wording, edit "Someone answered an alert email" on the Email templates tab (placeholder {history}).
+
+### Answer buttons know who you are (no typing)
+Every person on an alert email now gets his OWN copy, with personal answer links. When he clicks a button, the page says "Answering as Mia Khan <mia@...>" and he only presses Confirm (a note is optional). The name comes from the Affiliate managers list; if his email is not in the list, the name is made from the email address.
+- Everyone still sees the same To / CC list. Only the links differ.
+- A link that was changed by hand, or an old email sent before this update, falls back to the normal page where the name and email are typed.
+- If a person forwards his email, the link still answers as the first person. Tell your team not to forward alert emails.
+- Costs a few more sends per alert (one per person), still well inside Gmail limits for normal use.
+
+### New DIDs that never get a call
+New rule on the Emails tab: **New DID with no calls yet**.
+- A DID that was added recently and never had a call is alerted when it is **Days** old (default 3), then again every **Days** days (a REMINDER, with a counter: alert #2, #3 ...) until its first call arrives. Change "Days" to 5 or 7 on the Emails tab if you want.
+- **Count** (default 30) = how long a DID counts as "new" after it was added. After that, the normal "Inactive DID" alert takes over. Put 0 for no limit.
+- The email has a **Pause - the owner asked for more time** button. The manager clicks it, types the number of days (any number, 1-365), and confirms. No alerts for that DID until the pause ends, then they continue. The pause shows in the Paused table on the Alert Log tab, where you can also resume it early.
+- DIDs ticked "Never alert" are skipped. The alerts stop by themselves when the DID gets a call.
+- Pause and the answer buttons are editable on the Email templates tab. For the "custom days" button use the effect **snooze_custom** (Days = the number suggested in the box).
+- Right after the update, every DID that is already in the "new, no calls" state gets its first alert (up to 40 per run, the rest follow). If that is too many, lower **Count** first.
+
+### Publisher caps per campaign: now automatic from Ringba
+On the **Caps** tab, "Publisher caps per campaign" is filled in from Ringba by itself, using your account API token (no new secret needed).
+- It reads `GET /v2/{accountId}/campaigns` and takes each publisher's **dailyCap** and **monthlyCap** from the campaign's payout rules. A publisher without its own payout rule uses the campaign's default payout. `-1` = no cap. Dollar caps (SumCap) are not used.
+- The engine re-reads it every 60 minutes (setting `pubcaps_sync_minutes`). Press **Read publisher caps from Ringba now** to do it at once. The result line shows how many caps were found, and which publishers are not in this tool yet (they appear after their first call).
+- Usage is counted from your own call data: PAID calls of that publisher in that campaign. The alert levels (default 80,100), the Active tick and the notes are yours to change and are never overwritten. The cap size follows Ringba. If Ringba removes a cap, the row is switched off.
+- A cap you type yourself for the same publisher + campaign + period always wins.
+- A "global" default payout cap (shared by all publishers) is skipped, because it is not a per-publisher cap. If a publisher has several payout rules with a cap, the first one is used (the note says so).
+- Ringba's cap day follows the time zone inside the payout rule (for example Eastern). Ours follows "Day starts at" and the Timezone in Settings: set them the same.
+- If the button says "No cap found", it prints the field names Ringba returned. Send me that line and I will adjust.

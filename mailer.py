@@ -5,6 +5,7 @@ import time
 from email.message import EmailMessage
 from email.utils import formataddr
 
+import actions
 import alerts
 import config
 import db
@@ -25,7 +26,7 @@ def sender():
     return name, addr
 
 
-def _build(to_list, cc_list, subject, body, html=None, attachments=None):
+def _build(to_list, cc_list, subject, body, html=None, attachments=None, headers=None):
     name, addr = sender()
     msg = EmailMessage()
     msg["From"] = formataddr((name, addr)) if name else addr
@@ -36,6 +37,9 @@ def _build(to_list, cc_list, subject, body, html=None, attachments=None):
     if reply_to:
         msg["Reply-To"] = ", ".join(reply_to)
     msg["Subject"] = subject
+    for k, v in (headers or {}).items():
+        if v:
+            msg[k] = v
     msg.set_content(body)
     if html:
         msg.add_alternative(html, subtype="html")
@@ -79,15 +83,30 @@ class Session:
         self.stack, self.server = None, None
 
 
-def smtp_send(to_list, cc_list, subject, body, html=None, attachments=None, session=None):
+def smtp_send(to_list, cc_list, subject, body, html=None, attachments=None, session=None, headers=None, envelope=None):
     if not config.SMTP_USER or not config.SMTP_PASSWORD:
         raise RuntimeError("SMTP_USER / SMTP_PASSWORD are missing in your Secrets.")
-    msg, addr, recipients = _build(to_list, cc_list, subject, body, html, attachments)
+    msg, addr, recipients = _build(to_list, cc_list, subject, body, html, attachments, headers)
+    if envelope:
+        recipients = list(envelope)          # same visible To / Cc, but delivered to this one person only
     if session is not None:
         session.get().send_message(msg, from_addr=addr, to_addrs=recipients)
         return
     with contextlib.ExitStack() as stack:
         _open(stack).send_message(msg, from_addr=addr, to_addrs=recipients)
+
+
+def thread_headers(a):
+    """Message-ID for every alert; an answer also points to the alert it answers (In-Reply-To / References),
+    so Gmail / Outlook show them as ONE conversation."""
+    _, addr = sender()
+    domain = (addr or "localhost").split("@")[-1]
+    h = {"Message-ID": f"<p2c-alert-{a['id']}@{domain}>"}
+    if a.get("thread_id"):
+        parent = f"<p2c-alert-{a['thread_id']}@{domain}>"
+        h["In-Reply-To"] = parent
+        h["References"] = parent
+    return h
 
 
 def send_test(to_list, subject="Test email from your Pay-Per-Call alert tool"):
@@ -123,7 +142,14 @@ def process_outbox(limit=25, max_seconds=None):
                 res["dry_run"] += 1
                 continue
             try:
-                smtp_send(to, cc, a["subject"], a["body"], a.get("body_html"), session=session)
+                hdr = thread_headers(a)
+                if "/?a=" in (a["body"] or ""):
+                    # an alert with answer buttons: everybody gets his OWN links, so the app knows who answered
+                    for rcpt in dict.fromkeys(to + cc):
+                        t, h = actions.personalize(a["body"], a.get("body_html"), rcpt)
+                        smtp_send(to, cc, a["subject"], t, h, session=session, headers=hdr, envelope=[rcpt])
+                else:
+                    smtp_send(to, cc, a["subject"], a["body"], a.get("body_html"), session=session, headers=hdr)
                 db.x("UPDATE alerts SET status='sent', sent_at=:n, attempts=attempts+1, last_error=NULL WHERE id=:i",
                      n=db.now_utc(), i=a["id"])
                 res["sent"] += 1

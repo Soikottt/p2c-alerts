@@ -651,6 +651,99 @@ def fetch_targets(max_details=300):
     return out, report
 
 
+# ------------------------------------------------------------ publisher caps (payout rules of each campaign)
+def _items(data, keys):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in keys:
+            v = data.get(k)
+            if isinstance(v, list):
+                return v
+            if isinstance(v, dict):
+                inner = _items(v, keys)
+                if inner:
+                    return inner
+    return []
+
+
+def payout_rules(v):
+    """All payout rules inside a Ringba value (a list, or one rule, or a wrapper). A rule = a dict with '...Cap' fields."""
+    out = []
+    if isinstance(v, dict):
+        if any(norm(k).endswith("cap") for k in v):
+            return [v]
+        for x in v.values():
+            if isinstance(x, (list, dict)):
+                out += payout_rules(x)
+    elif isinstance(v, list):
+        for x in v:
+            out += payout_rules(x)
+    return out
+
+
+def _first_cap(rules, field):
+    """The first rule that has a cap in this field -> (cap, number of rules with a cap there)."""
+    caps = [cap_value(_pick(r, [field])) for r in rules]
+    caps = [c for c in caps if c]
+    return (caps[0] if caps else None), len(caps)
+
+
+def parse_campaign_caps(camp):
+    """One campaign (as Ringba returns it) -> list of {'campaign_id','campaign_name','pub_rid','pub_name','daily_cap','monthly_cap',
+    'inherited','rule_count'}: one entry per publisher (affiliate) that has a cap in this campaign. Caps are counts of payouts."""
+    if not isinstance(camp, dict):
+        return []
+    cid = as_str(_pick(camp, ["id", "campaignId"]))
+    cname = as_str(_pick(camp, ["name", "campaignName"])) or cid
+    defaults = [r for r in payout_rules(_pick(camp, ["defaultPayouts", "defaultPayout"])) if not as_bool(_pick(r, ["isGlobal"]))]
+    out = []
+    for a in (_pick(camp, ["affiliates", "publishers"]) or []):
+        if not isinstance(a, dict):
+            continue
+        own = payout_rules(_pick(a, ["payoutConversionSettings", "payoutSettings"]))
+        rules, inherited = (own, False) if own else (defaults, True)      # no own rules: the publisher uses the campaign's default payouts
+        daily, nd = _first_cap(rules, "dailyCap")
+        monthly, nm = _first_cap(rules, "monthlyCap")
+        if not (daily or monthly):
+            continue
+        out.append({"campaign_id": cid, "campaign_name": cname,
+                    "pub_rid": as_str(_pick(a, ["affiliateId", "publisherId", "id"])),
+                    "pub_name": as_str(_pick(a, ["affiliateName", "publisherName", "name"])),
+                    "daily_cap": daily, "monthly_cap": monthly, "inherited": inherited, "rule_count": max(nd, nm)})
+    return out
+
+
+def fetch_publisher_caps(max_details=100):
+    """Publisher caps of every campaign, read from the campaigns' payout rules. Returns (list, report)."""
+    headers = _auth_headers()
+    acct = config.RINGBA_ACCOUNT_ID
+    data = _json(_get(f"{BASE}/{acct}/campaigns", headers), "the campaigns list")
+    camps = _items(data, ("campaigns", "data", "items", "result", "results", "records"))
+    out, details, no_aff = [], 0, 0
+    for c in camps:
+        if not isinstance(c, dict):
+            continue
+        if _pick(c, ["affiliates", "publishers"]) is None and details < max_details:     # the list had no publisher info: ask for this campaign in full
+            cid = as_str(_pick(c, ["id", "campaignId"]))
+            if cid:
+                details += 1
+                _nap(0.2)
+                d = _json(_get(f"{BASE}/{acct}/campaigns/{cid}", headers), f"campaign {cid}")
+                if isinstance(d, dict) and isinstance(d.get("campaign"), dict):
+                    d = d["campaign"]
+                if isinstance(d, dict):
+                    c = {**c, **d}
+        if _pick(c, ["affiliates", "publishers"]) is None:
+            no_aff += 1
+        out += parse_campaign_caps(c)
+    first = next((c for c in camps if isinstance(c, dict)), {})
+    aff = next((a for c in camps if isinstance(c, dict) for a in (_pick(c, ["affiliates", "publishers"]) or []) if isinstance(a, dict)), {})
+    report = {"campaigns": len(camps), "with_caps": len(out), "detail_calls": details, "without_publisher_list": no_aff,
+              "campaign_keys": sorted(first)[:40], "affiliate_keys": sorted(aff)[:40]}
+    return out, report
+
+
 def parse_counts(data, target_id):
     """Live counters of one target. The id in the answer may be written with other capitalisation."""
     stats = data.get("stats") if isinstance(data, dict) else None
