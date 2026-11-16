@@ -2,9 +2,8 @@ name: Alert engine (every 5 minutes)
 
 on:
   schedule:
-    # every 5 minutes, but NOT on :00 / :05 / :10 ... : GitHub is busiest on those minutes and silently skips scheduled runs then
-    - cron: "2-59/5 * * * *"
-  workflow_dispatch:
+    - cron: "*/5 * * * *"          # every 5 minutes (GitHub does not allow faster)
+  workflow_dispatch: {}           # also lets you run it by hand from the Actions tab
 
 concurrency:
   group: alert-engine
