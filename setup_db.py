@@ -31,6 +31,8 @@ RULE_SEEDS = [
      "A buyer target reached a % of its daily or monthly cap. Caps and live usage are read from Ringba automatically."),
     ("task_digest", "My daily task list", True, None, None, False, False, False,
      "Your own task list, emailed once a day at the time you choose (My Tasks tab). Goes to the admin e-mail address(es)."),
+    ("task_alert", "My tasks: alert and follow-up", True, None, None, False, False, False,
+     "Your own tasks (My Tasks tab): an email at each task's alert date and time, then a follow-up every N minutes until you tick Done. Goes to the admin e-mail address(es)."),
     ("engine_stale", "Alert engine was offline", True, None, 45, False, False, False,
      "The 5-minute engine did not run for N minutes. N = 'Count' (minutes)."),
     ("sync_error", "Ringba sync failed", True, None, None, False, False, False,
@@ -65,6 +67,10 @@ ADD_COLUMNS = [
     ("alert_rules", "template_id", "INTEGER"),
     ("alerts", "body_html", "TEXT"),
     ("caps", "source", "TEXT"),
+    ("tasks", "alert_time", "TEXT"),
+    ("tasks", "repeat_days", "INTEGER"),
+    ("tasks", "last_alert_at", "TIMESTAMPTZ"),
+    ("tasks", "alert_count", "INTEGER NOT NULL DEFAULT 0"),
     ("caps", "ringba_key", "TEXT"),
     ("alerts", "thread_id", "INTEGER"),
     ("alerts", "snooze_key", "TEXT"),
@@ -181,7 +187,7 @@ def ensure_columns():
         db.q1("SELECT ringba_target_id FROM targets LIMIT 1")
         db.q1("SELECT thread_id FROM alerts LIMIT 1")
         db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
-        db.q1("SELECT title FROM tasks LIMIT 1")
+        db.q1("SELECT title, alert_time, repeat_days, last_alert_at, alert_count FROM tasks LIMIT 1")
         db.q1("SELECT event FROM task_log LIMIT 1")
         return False
     except Exception:

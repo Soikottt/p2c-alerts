@@ -244,7 +244,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   status TEXT NOT NULL DEFAULT 'open',
   done_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ,
+  alert_time TEXT,
+  repeat_days INTEGER,
+  last_alert_at TIMESTAMPTZ,
+  alert_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS task_log (

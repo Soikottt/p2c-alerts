@@ -1,6 +1,6 @@
 """Pay-Per-Call Alert Center  -  the screen you work in."""
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import json
@@ -109,7 +109,7 @@ def schema_ready():
         db.q1("SELECT ringba_target_id FROM targets LIMIT 1")
         db.q1("SELECT thread_id FROM alerts LIMIT 1")
         db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
-        db.q1("SELECT title FROM tasks LIMIT 1")
+        db.q1("SELECT title, alert_time, repeat_days, last_alert_at, alert_count FROM tasks LIMIT 1")
         return True
     except Exception:
         return False
@@ -299,9 +299,10 @@ def table_editor(name, df, column_config, display_cols, table, transform=None, r
         for e in msg["errors"]:
             st.error(e)
     ver = st.session_state.get(f"ver_{name}", 0)
+    df, fsig = filter_bar(name, df)
     order, column_config = view_controls(name, df, column_config)
     with st.form(f"form_{name}"):
-        edited = st.data_editor(df, key=f"ed_{name}_{ver}", column_config=column_config, hide_index=True, column_order=order,
+        edited = st.data_editor(df, key=f"ed_{name}_{ver}_{fsig}", column_config=column_config, hide_index=True, column_order=order,
                                 num_rows="dynamic" if dynamic else "fixed", disabled=list(disabled))
         submitted = st.form_submit_button("💾 Save changes")
     if submitted:
@@ -314,6 +315,61 @@ def table_editor(name, df, column_config, display_cols, table, transform=None, r
 
 def frame(rows, columns):
     return pd.DataFrame(rows, columns=columns)
+
+
+def filter_bar(name, df, skip=(), max_unique=40):
+    """A search box + pick-lists for the columns that have few different values (status, type, publisher ...).
+    Returns (the filtered table, a short code of the current filter). Nothing selected = no filter."""
+    import hashlib
+    if df is None or len(df) == 0:
+        return df, "0"
+    # text version of every column (empty cells -> ""), used for searching and the pick-lists
+    txt = df.astype(object).where(df.notna(), "").astype(str)
+    cand = []
+    for c in df.columns:
+        if c in skip or str(c).startswith("_") or str(c).lower() == "id":
+            continue
+        try:
+            n = txt[c].nunique()
+        except Exception:
+            continue
+        if 2 <= n <= max_unique:
+            cand.append(c)
+    active = sum(1 for c in cand if st.session_state.get(f"fl_{name}_{c}"))
+    q = st.session_state.get(f"fq_{name}", "")
+
+    def reset():
+        st.session_state[f"fq_{name}"] = ""
+        for c in cand:
+            st.session_state[f"fl_{name}_{c}"] = []
+    a, b = st.columns([4, 1])
+    q = a.text_input("🔍 Search", key=f"fq_{name}", placeholder="Type any word: name, number, status ...", label_visibility="collapsed")
+    b.button("✖ Clear filters", key=f"fr_{name}", on_click=reset, disabled=not (q or active), use_container_width=True)
+    picks = {}
+    if cand:
+        with st.expander(f"🎛️ Filters" + (f" ({active} active)" if active else ""), expanded=bool(active)):
+            cols = st.columns(min(len(cand), 4))
+            for i, c in enumerate(cand):
+                vals = sorted(txt[c].unique())
+                picks[c] = cols[i % len(cols)].multiselect(str(c), vals, key=f"fl_{name}_{c}")
+    out = df
+    if q:
+        hay = txt.apply(lambda col: col.str.contains(q, case=False, regex=False)).any(axis=1)
+        out = out[hay]
+    for c, sel in picks.items():
+        if sel:
+            out = out[txt[c].isin(sel)]
+    sig = hashlib.md5((q + "|" + "|".join(f"{c}={sorted(v)}" for c, v in picks.items() if v)).encode()).hexdigest()[:8]
+    if len(out) != len(df):
+        st.caption(f"Showing {len(out):,} of {len(df):,} rows.")
+    return out.reset_index(drop=True), sig
+
+
+def show_df(name, df, **kw):
+    """st.dataframe with the search / filter bar above it."""
+    df2, _ = filter_bar(name, df)
+    st.dataframe(df2, hide_index=True, **kw)
+    return df2
 
 
 def ago(dt):
@@ -387,7 +443,7 @@ def page_dashboard():
             u = rules.cap_usage(c, now)
             out.append({"Type": c["entity_type"], "Name": u["name"], "Period": c["period"], "Counts": c["metric"],
                         "Used": u["usage"], "Cap": c["cap_value"], "Percent": round(u["pct"], 1)})
-        st.dataframe(pd.DataFrame(out).sort_values("Percent", ascending=False), hide_index=True)
+        show_df("dash_caps", pd.DataFrame(out).sort_values("Percent", ascending=False))
     tg_rows = db.q("SELECT * FROM targets WHERE active = TRUE AND (daily_cap IS NOT NULL OR monthly_cap IS NOT NULL) AND counts_at IS NOT NULL")
     if tg_rows:
         st.subheader("Buyer target caps right now (from Ringba)")
@@ -397,7 +453,7 @@ def page_dashboard():
                 if cap:
                     out.append({"Buyer": t["buyer_name"] or "", "Target": t["name"], "Period": per, "Used": used or 0, "Cap": cap,
                                 "Percent": round((used or 0) / cap * 100, 1)})
-        st.dataframe(pd.DataFrame(out).sort_values("Percent", ascending=False), hide_index=True)
+        show_df("dash_tcaps", pd.DataFrame(out).sort_values("Percent", ascending=False))
 
     st.subheader("Latest alerts")
     rows = db.q("SELECT created_at, alert_type, subject, status, response_label FROM alerts "
@@ -405,7 +461,7 @@ def page_dashboard():
     if rows:
         d = pd.DataFrame(rows)
         d["created_at"] = d["created_at"].map(fmt)
-        st.dataframe(d, hide_index=True)
+        show_df("dash_alerts", d)
     else:
         st.caption("No alerts yet.")
 
@@ -529,13 +585,13 @@ def page_reports():
                         (t_did, "did", "by_did"), (t_camp, "campaign", "by_campaign")]:
         with tab:
             bd = reports.breakdown(df, by)
-            st.dataframe(bd, hide_index=True)
+            bd = show_df(f"rep_{by}", bd)
             st.download_button("⬇️ Download CSV", bd.to_csv(index=False), f"{fn}_{a}_{b}.csv", "text/csv", key=f"dl_{fn}")
     with t_raw:
         raw = df.drop(columns=["day"]).copy()
         raw["call_at"] = raw["call_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
         st.caption(f"Showing the newest 2,000 of {len(raw):,} calls. The download has all of them.")
-        st.dataframe(raw.tail(2000).iloc[::-1], hide_index=True)
+        show_df("rep_raw", raw.tail(2000).iloc[::-1].reset_index(drop=True))
         st.download_button("⬇️ Download all calls CSV", raw.to_csv(index=False), f"calls_{a}_{b}.csv", "text/csv", key="dl_raw")
 
 
@@ -1184,6 +1240,23 @@ def page_templates():
 
 
 # ================================================================== ALERT LOG
+def log_state(r, has_buttons):
+    """(group, label) for one alert row, so you can see at a glance what needs you."""
+    s, c = r["status"], (r["case_status"] or "open")
+    if s == "failed":
+        return "needs", "🔴 E-MAIL FAILED"
+    if s == "pending":
+        return "wait", "🟡 QUEUED - not sent yet"
+    if s == "skipped":
+        return "info", "⚪ Skipped"
+    if s == "dry_run":
+        return "info", "🧪 TEST - not really sent"
+    return {"follow_up": ("needs", "🔴 NEEDS ACTION - answered"), "pending": ("needs", "🔴 NEEDS ACTION - not started"),
+            "in_progress": ("wait", "🔧 IN PROGRESS"), "waiting": ("wait", "🟡 WAITING for publisher / AM"),
+            "done": ("done", "🟢 DONE"), "no_action": ("done", "🟢 NO ACTION NEEDED")}.get(
+        c, ("wait", "🟡 WAITING for an answer") if has_buttons else ("info", "⚪ INFO only"))
+
+
 def page_log():
     flash("flash_log")
     counts = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) AS n FROM alerts GROUP BY status")}
@@ -1202,9 +1275,10 @@ def page_log():
     if st.session_state.get("backup_zip"):
         fname, data = st.session_state["backup_zip"]
         c4.download_button("⬇️ Download " + fname, data, fname, "application/zip", key="dl_backup")
-    f1, f2 = st.columns(2)
-    show = f1.multiselect("Show status", ["pending", "sent", "dry_run", "failed", "skipped"], default=["pending", "sent", "dry_run", "failed"])
-    case_f = f2.multiselect("Team status", cases.STATUSES, default=cases.STATUSES, format_func=cases.label)
+    with st.expander("More filters (e-mail status, team status)"):
+        f1, f2 = st.columns(2)
+        show = f1.multiselect("Show status", ["pending", "sent", "dry_run", "failed", "skipped"], default=["pending", "sent", "dry_run", "failed"])
+        case_f = f2.multiselect("Team status", cases.STATUSES, default=cases.STATUSES, format_func=cases.label)
     if show and case_f:
         rows = db.q_in("SELECT id, created_at, alert_type, subject, to_emails, cc_emails, status, attempts, last_error, case_status, "
                        "response_label, response_note, responded_by, responded_at FROM alerts WHERE status IN :s ORDER BY id DESC LIMIT 400",
@@ -1213,25 +1287,44 @@ def page_log():
         if not rows:
             st.info("Nothing to show.")
         else:
+            with_buttons = {r["alert_id"] for r in db.q_in("SELECT DISTINCT alert_id FROM alert_actions WHERE alert_id IN :i", "i", [r["id"] for r in rows])}
+            for r in rows:
+                r["_cat"], r["_state"] = log_state(r, r["id"] in with_buttons)
+            cnt = {k: sum(1 for r in rows if r["_cat"] == k) for k in ("needs", "wait", "done", "info")}
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("🔴 Needs action", cnt["needs"], help="An AM answered and the work is not done, work not started, or the e-mail failed")
+            k2.metric("🟡 Waiting", cnt["wait"], help="Queued to send, waiting for an answer, or work in progress")
+            k3.metric("🟢 Done", cnt["done"])
+            k4.metric("⚪ Info", cnt["info"], help="Information only, test e-mails and skipped alerts")
+            pick_cat = st.radio("Show", ["All", f"🔴 Needs action ({cnt['needs']})", f"🟡 Waiting ({cnt['wait']})", f"🟢 Done ({cnt['done']})", f"⚪ Info ({cnt['info']})"],
+                                horizontal=True, key="log_cat", label_visibility="collapsed")
+            want = {"🔴": "needs", "🟡": "wait", "🟢": "done", "⚪": "info"}.get(pick_cat[:1])
+            rank = {"needs": 0, "wait": 1, "info": 2, "done": 3}
+            rows = sorted([r for r in rows if want is None or r["_cat"] == want], key=lambda r: (rank[r["_cat"]], -r["id"]))
             last_note, replied_by = {}, {}
             for n in db.q("SELECT alert_id, source, author, text FROM alert_notes ORDER BY id"):
                 who_ = n["author"] or {"answer": "AM", "email": "AM", "team": "Team"}.get(n["source"], "")
                 last_note[n["alert_id"]] = f"{n['text']}  - {who_} ({n['source']})"
                 if n["source"] == "email":
                     replied_by[n["alert_id"]] = who_
-            recs = [{"id": r["id"], "created": fmt(r["created_at"]), "type": r["alert_type"], "subject": r["subject"],
+            recs = [{"state": r["_state"], "id": r["id"], "created": fmt(r["created_at"]), "type": r["alert_type"], "subject": r["subject"],
                      "team_status": cases.label(r["case_status"]),
                      "am_answer": (f"{r['response_label']} - {r['responded_by'] or 'name not given'}" if r["response_label"] else ""),
                      "note_for_team": r["response_note"] or "", "latest_note": last_note.get(r["id"], ""), "add_note": "",
                      "answered_by": r["responded_by"] or (f"(email reply) {replied_by[r['id']]}" if r["id"] in replied_by else ""), "answered_at": fmt(r["responded_at"]) if r["responded_at"] else "",
-                     "sent": r["status"], "to": r["to_emails"], "cc": r["cc_emails"], "error": r["last_error"] or ""} for r in rows]
-            cols = ["id", "created", "type", "subject", "team_status", "am_answer", "note_for_team", "latest_note", "add_note",
-                    "answered_by", "answered_at", "sent", "to", "cc", "error"]
+                     "sent": r["status"], "to": r["to_emails"], "cc": r["cc_emails"], "error": r["last_error"] or "", "_cat": r["_cat"]} for r in rows]
+            cols = ["state", "id", "created", "type", "subject", "team_status", "am_answer", "note_for_team", "latest_note", "add_note",
+                    "answered_by", "answered_at", "sent", "to", "cc", "error", "_cat"]
             df = frame(recs, cols)
+            df, fsig = filter_bar("alertlog_f", df, skip=("subject", "note_for_team", "latest_note", "add_note", "answered_at", "to", "cc", "error", "state", "am_answer"))
+            st.caption("🔴 **NEEDS ACTION** = an AM answered (do what the answer says), work not started, or the e-mail failed · "
+                       "🟡 **WAITING** = queued, waiting for an answer, or work in progress · 🟢 **DONE** · ⚪ **INFO** only. "
+                       "Red rows are sorted to the top.")
             st.caption("**Team status** is the dropdown in the table: change it (for example to *Done* once you did what the answer says), "
                        "type a note in **Add a note** if you like, then press **Save status / notes** once. Every change is kept in the history.")
             ver = st.session_state.get("logver", 0)
-            cfg = {"id": st.column_config.NumberColumn("#"),
+            cfg = {"_cat": None, "state": st.column_config.TextColumn("State", width="medium", help="What to do with this alert"),
+                   "id": st.column_config.NumberColumn("#", width="small"),
                    "created": st.column_config.TextColumn("Created"), "type": st.column_config.TextColumn("Alert type"),
                    "subject": st.column_config.TextColumn("Subject", width="large"),
                    "team_status": st.column_config.SelectboxColumn("Team status", options=[cases.STATUS_LABEL[s] for s in cases.STATUSES], width="medium"),
@@ -1242,10 +1335,20 @@ def page_log():
                    "answered_by": st.column_config.TextColumn("Answered by"), "answered_at": st.column_config.TextColumn("Answered at"),
                    "sent": st.column_config.TextColumn("Email status"), "to": st.column_config.TextColumn("To"),
                    "cc": st.column_config.TextColumn("CC"), "error": st.column_config.TextColumn("Error")}
-            order, cfg = view_controls("alertlog", df, cfg)
+            order, cfg = view_controls("alertlog2", df, cfg)
+            tint = {"needs": "rgba(255,75,75,0.20)", "wait": "rgba(255,196,0,0.18)", "done": "rgba(40,180,90,0.16)", "info": ""}
+            try:
+                shown = df.style.apply(lambda r: [f"background-color: {tint[r['_cat']]}" if tint[r["_cat"]] else ""] * len(r), axis=1) \
+                                .map(lambda v: "font-weight: 700", subset=["state"])
+            except Exception:
+                shown = df
             with st.form("log_table_form"):
-                edited = st.data_editor(df, key=f"ed_logtbl_{ver}", column_config=cfg, hide_index=True, num_rows="fixed", column_order=order,
-                                        disabled=[c for c in cols if c not in ("team_status", "add_note")])
+                try:
+                    edited = st.data_editor(shown, key=f"ed_logtbl_{ver}_{fsig}", column_config=cfg, hide_index=True, num_rows="fixed", column_order=order,
+                                            disabled=[c for c in cols if c not in ("team_status", "add_note")])
+                except Exception:        # an older Streamlit that cannot colour the rows: show it plain
+                    edited = st.data_editor(df, key=f"ed_logtbl_{ver}_{fsig}_plain", column_config=cfg, hide_index=True, num_rows="fixed", column_order=order,
+                                            disabled=[c for c in cols if c not in ("team_status", "add_note")])
                 who_t = st.text_input("Your name (saved with your changes)", key="log_who_table")
                 go_t = st.form_submit_button("💾 Save status / notes")
             if go_t:
@@ -1264,7 +1367,7 @@ def page_log():
                 set_flash("flash_log", "ok", f"Saved {changed} update(s)." if changed else "Nothing was changed.")
                 st.rerun()
 
-            pick = st.selectbox("Open one alert (id)", [r["id"] for r in rows], key="log_pick")
+            pick = st.selectbox("Open one alert (id)", [int(x) for x in df["id"]] or [r["id"] for r in rows], key="log_pick")
             a = db.q1("SELECT * FROM alerts WHERE id=:i", i=pick)
             if a:
                 ans = ""
@@ -1338,8 +1441,8 @@ def page_log():
             if n > 1:
                 r["what"] = f"{r['what']} ({n})"
             r["until"] = fmt(r["snooze_until"])
-        st.dataframe(pd.DataFrame(sn).rename(columns={"what": "paused", "campaign": "campaign name", "publisher": "publisher name"})
-                     [["paused", "campaign name", "publisher name", "until", "reason"]], hide_index=True)
+        show_df("paused", pd.DataFrame(sn).rename(columns={"what": "paused", "campaign": "campaign name", "publisher": "publisher name"})
+                [["paused", "campaign name", "publisher name", "until", "reason"]])
         with st.form("unsnooze_form"):
             pick = st.multiselect("Resume alerts for", [r["what"] for r in sn], key="unsnooze_pick")
             go = st.form_submit_button("Resume now")
@@ -1427,7 +1530,7 @@ def page_sync():
     if rows:
         d = pd.DataFrame(rows)
         d["started_at"] = d["started_at"].map(fmt)
-        st.dataframe(d, hide_index=True)
+        show_df("syncruns", d)
 
 
 # ================================================================== SETTINGS
@@ -1519,42 +1622,80 @@ def page_settings():
 def page_tasks():
     import tasks
     flash("flash_tasks")
-    td = tasks.today()
-    st.caption(f"Your own to-do list. Today (your time zone) is {td:%A %d %b %Y}. A task shows up in your daily e-mail when its "
-               "**alert date** or **work date** has come, and stays there until you tick it as done.")
+    now = db.now_utc()
+    td = tasks.today(now)
+    tzn = db.get_setting("tasks_timezone", "Asia/Dhaka")
+    st.caption(f"Your own to-do list. It is **{tasks.local_now(now):%A %d %b %Y, %I:%M %p}** now ({tzn}). An e-mail is sent at each task's "
+               "**alert date and time**. If you do not tick **Done**, a follow-up e-mail comes "
+               f"{'every ' + str(tasks.followup_minutes()) + ' minutes' if tasks.followup_minutes() else '(follow-ups are OFF)'} until you do. "
+               "The engine checks every 5 minutes, so an e-mail can be up to 5 minutes late.")
+    opts = tasks.time_options()
+    dflt = tasks.fmt_time(tasks.default_time())
     with st.form("task_add", clear_on_submit=True):
         title = st.text_input("Task (what to do)", key="task_title")
         c1, c2, c3 = st.columns(3)
         wd = c1.date_input("Work date (do it on)", td, key="task_wd")
-        ad = c2.date_input("Alert date (remind me on)", td, key="task_ad", help="Can be earlier than the work date. The reminder comes in your daily e-mail.")
-        rep = c3.selectbox("Repeat", tasks.REPEATS, format_func=lambda r: tasks.REPEAT_LABEL[r], key="task_rep",
-                           help="A repeating task moves to its next date when you tick Done.")
+        ad = c2.date_input("Alert date (e-mail me on)", td, key="task_ad", help="Can be earlier than the work date.")
+        at_ = c3.selectbox("Alert time (AM/PM)", opts, index=opts.index(dflt) if dflt in opts else 36, key="task_at")
+        c4, c5 = st.columns(2)
+        rep = c4.selectbox("Repeat", tasks.REPEATS, format_func=lambda r: tasks.REPEAT_LABEL[r], key="task_rep",
+                           help="When you tick Done, a repeating task moves to its next date and the alert comes again.")
+        rdays = c5.number_input("N for 'Every N days'", 1, 365, 7, key="task_rdays", help="Only used when Repeat = Every N days.")
         notes = st.text_area("Note (optional)", key="task_notes", height=70)
-        if st.form_submit_button("➕ Add task"):
+        if st.form_submit_button("➕ Add task", type="primary"):
             try:
-                tasks.add_task(title, notes, wd, ad, rep)
-                set_flash("flash_tasks", "ok", "Task added.")
+                tid = tasks.add_task(title, notes, wd, ad, rep, at_, rdays if rep == "custom" else None)
+                late = tasks.alert_dt(db.q1("SELECT * FROM tasks WHERE id=:i", i=tid)) <= now
+                set_flash("flash_tasks", "ok", "Task added." + (" Its alert time has already passed, so the e-mail goes out within 5 minutes." if late else
+                                                                  f" You get the e-mail on {ad:%a %d %b} at {at_}."))
                 st.rerun()
             except ValueError as e:
                 st.error(str(e))
 
     rows = tasks.open_tasks()
-    st.subheader(f"To do ({len(rows)})")
-    if not rows:
-        st.info("Nothing open. Add your first task above.")
+    state = {r["id"]: tasks.state_of(r, now) for r in rows}
+    n_act = sum(1 for v in state.values() if v == "action")
+    n_due = sum(1 for v in state.values() if v == "due")
+    n_up = sum(1 for v in state.values() if v == "upcoming")
+    done_today = db.q1("SELECT COUNT(*) AS n FROM task_log WHERE event='done' AND at >= :s", s=tasks.local_now(now).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc))["n"]
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("🔴 Action needed", n_act, help="Alert sent and not done yet, or the work date has passed")
+    k2.metric("🟠 Due now", n_due, help="Alert time has come: the e-mail goes out within 5 minutes")
+    k3.metric("⚪ Upcoming", n_up)
+    k4.metric("✅ Done today", done_today)
+    view = st.radio("Show", ["🔴 Action needed + due now", "⚪ Upcoming", "All open"], horizontal=True, key="task_view")
+    shown = [r for r in rows if (view == "All open" or (view.startswith("⚪") and state[r["id"]] == "upcoming")
+                                  or (view.startswith("🔴") and state[r["id"]] in ("action", "due")))]
+    rank = {"action": 0, "due": 1, "upcoming": 2}
+    shown.sort(key=lambda r: (rank[state[r["id"]]], tasks.alert_dt(r) or now))
+    st.subheader(f"To do ({len(shown)})")
+    if not shown:
+        st.info("Nothing here." if rows else "Nothing open. Add your first task above.")
     else:
-        icon = {"Overdue": "🔴 Overdue", "Today": "🟠 Today", "Reminder": "🔔 Reminder", "Later": "⚪ Later"}
-        df = pd.DataFrame([{"id": r["id"], "Done": False, "Status": icon[tasks.status_of(r, td)], "Task": r["title"],
+        df = pd.DataFrame([{"id": r["id"], "Done": False, "Status": tasks.STATE_LABEL[state[r["id"]]], "Task": r["title"],
                             "Work date": tasks.pdate(r["work_date"]), "Alert date": tasks.pdate(r["alert_date"]),
-                            "Repeat": r["repeat"], "Note": r["notes"] or "", "Remove": False} for r in rows])
-        ed = st.data_editor(df, hide_index=True, use_container_width=True, key="task_editor", disabled=["id", "Status"],
-                            column_order=["Done", "Status", "Task", "Work date", "Alert date", "Repeat", "Note", "Remove"],
-                            column_config={"id": None,
-                                           "Done": st.column_config.CheckboxColumn("Done", width="small"),
-                                           "Work date": st.column_config.DateColumn("Work date", format="YYYY-MM-DD"),
-                                           "Alert date": st.column_config.DateColumn("Alert date", format="YYYY-MM-DD"),
-                                           "Repeat": st.column_config.SelectboxColumn("Repeat", options=tasks.REPEATS, required=True),
-                                           "Remove": st.column_config.CheckboxColumn("Remove", width="small", help="Deletes the task (the history stays)")})
+                            "Alert time": tasks.fmt_time(r["alert_time"] or tasks.default_time()), "Repeat": r["repeat"],
+                            "Every N days": r["repeat_days"], "Next e-mail": tasks.next_alert_text(r, now),
+                            "Note": r["notes"] or "", "Remove": False} for r in shown])
+        df, sig = filter_bar("tasks", df, skip=("Task", "Note", "Next e-mail", "id"))
+        order = ["Done", "Status", "Task", "Work date", "Alert date", "Alert time", "Repeat", "Every N days", "Next e-mail", "Note", "Remove"]
+        cfg = {"id": None, "Done": st.column_config.CheckboxColumn("Done", width="small"),
+               "Status": st.column_config.TextColumn("Status", width="medium"),
+               "Work date": st.column_config.DateColumn("Work date", format="ddd DD MMM YYYY"),
+               "Alert date": st.column_config.DateColumn("Alert date", format="ddd DD MMM YYYY"),
+               "Alert time": st.column_config.SelectboxColumn("Alert time", options=opts, required=True),
+               "Repeat": st.column_config.SelectboxColumn("Repeat", options=tasks.REPEATS, required=True),
+               "Every N days": st.column_config.NumberColumn("Every N days", min_value=1, max_value=365, step=1,
+                                                              help="Only for Repeat = custom"),
+               "Remove": st.column_config.CheckboxColumn("Remove", width="small", help="Deletes the task (the history stays)")}
+        styled = df.style.apply(lambda r: [{"🔴": "background-color: rgba(255,75,75,0.18)", "🟠": "background-color: rgba(255,170,0,0.18)"}
+                                            .get(str(r["Status"])[:1], "")] * len(r), axis=1) if len(df) else df
+        try:
+            ed = st.data_editor(styled, hide_index=True, use_container_width=True, key=f"task_editor_{sig}",
+                                disabled=["id", "Status", "Next e-mail"], column_order=order, column_config=cfg)
+        except Exception:
+            ed = st.data_editor(df, hide_index=True, use_container_width=True, key=f"task_editor_{sig}_plain",
+                                disabled=["id", "Status", "Next e-mail"], column_order=order, column_config=cfg)
         if st.button("💾 Save changes", type="primary", key="task_save"):
             done = changed = removed = 0
             for i in range(len(df)):
@@ -1563,19 +1704,23 @@ def page_tasks():
                 if n["Remove"]:
                     tasks.delete_task(tid); removed += 1
                     continue
-                if tasks.update_task(tid, title=n["Task"], notes=n["Note"], work_date=n["Work date"] if pd.notna(n["Work date"]) else None,
-                                     alert_date=n["Alert date"] if pd.notna(n["Alert date"]) else None, repeat=n["Repeat"]):
+                if tasks.update_task(tid, title=n["Task"], notes=n["Note"],
+                                     work_date=n["Work date"] if pd.notna(n["Work date"]) else None,
+                                     alert_date=n["Alert date"] if pd.notna(n["Alert date"]) else None,
+                                     alert_time=n["Alert time"], repeat=n["Repeat"],
+                                     repeat_days=int(n["Every N days"]) if pd.notna(n["Every N days"]) else None):
                     changed += 1
                 if n["Done"]:
                     tasks.mark_done(tid); done += 1
             set_flash("flash_tasks", "ok", f"Saved. Done: {done}, changed: {changed}, removed: {removed}.")
             st.rerun()
+        st.caption("Tick **Done** and press **Save changes**. You can also change any date, time, repeat or note in the table. "
+                   "Changing the alert date or time makes the alert start again.")
 
     with st.expander("✅ Done recently (tick Reopen to bring a task back)"):
         dn = db.q("SELECT id, title, done_at FROM tasks WHERE status='done' ORDER BY done_at DESC LIMIT 30")
         if dn:
-            ddf = pd.DataFrame([{"id": r["id"], "Reopen": False, "Task": r["title"],
-                                 "Done at": fmt(r["done_at"]) if r["done_at"] else ""} for r in dn])
+            ddf = pd.DataFrame([{"id": r["id"], "Reopen": False, "Task": r["title"], "Done at": tasks.fmt_dt(r["done_at"])} for r in dn])
             ded = st.data_editor(ddf, hide_index=True, use_container_width=True, key="task_done_editor", disabled=["id", "Task", "Done at"],
                                  column_config={"id": None})
             if st.button("Reopen ticked tasks", key="task_reopen"):
@@ -1584,46 +1729,59 @@ def page_tasks():
                         tasks.reopen(int(ddf.iloc[i]["id"]))
                 st.rerun()
         else:
-            st.write("No finished tasks yet.")
+            st.write("No finished tasks yet. (Repeating tasks do not appear here: they move to their next date. See History.)")
 
-    with st.expander("🕘 History (when tasks were created, changed or done)"):
-        lg = db.q("SELECT at, task_title, event, detail FROM task_log ORDER BY id DESC LIMIT 200")
-        st.dataframe(frame([{"When": fmt(r["at"]), "Task": r["task_title"], "What happened": r["event"], "Details": r["detail"]} for r in lg],
-                           ["When", "Task", "What happened", "Details"]), hide_index=True, use_container_width=True)
+    with st.expander("🕘 History (when tasks were created, alerted, changed or done)"):
+        lg = db.q("SELECT at, task_title, event, detail FROM task_log ORDER BY id DESC LIMIT 300")
+        hdf = frame([{"When": tasks.fmt_dt(r["at"]), "Task": r["task_title"], "What happened": r["event"], "Details": r["detail"]} for r in lg],
+                    ["When", "Task", "What happened", "Details"])
+        show_df("taskhist", hdf)
 
-    with st.expander("⏰ Daily e-mail settings"):
+    with st.expander("⏰ E-mail settings (alert time, follow-ups, quiet hours)"):
+        qf, qt = tasks.fmt_time(db.get_setting("tasks_quiet_from", "23:00")), tasks.fmt_time(db.get_setting("tasks_quiet_to", "06:00"))
         with st.form("task_settings"):
-            c1, c2 = st.columns(2)
-            on = c1.checkbox("Send my task list every day", value=str(db.get_setting("tasks_digest_on", "true")).lower() == "true", key="tk_on")
-            wk = c2.checkbox("Also on Saturday and Sunday", value=str(db.get_setting("tasks_weekends", "false")).lower() == "true", key="tk_wk")
-            tm = c1.text_input("Send time (HH:MM)", db.get_setting("tasks_send_time", "08:00"), key="tk_time",
-                               help="The list goes out at the first engine run after this time (the engine runs every 5 minutes).")
-            tzn = c2.text_input("Your time zone", db.get_setting("tasks_timezone", "Asia/Dhaka"), key="tk_tz")
+            c1, c2, c3 = st.columns(3)
+            dt_ = c1.selectbox("Default alert time", opts, index=opts.index(dflt) if dflt in opts else 36, key="tk_dt")
+            fm = c2.number_input("Follow-up every (minutes, 0 = never)", 0, 1440, tasks.followup_minutes(), key="tk_fm")
+            fx = c3.number_input("Follow-ups per alert (0 = no limit)", 0, 200, tasks.followup_max(), key="tk_fx")
+            c4, c5, c6 = st.columns(3)
+            q1_ = c4.selectbox("No follow-ups from", opts, index=opts.index(qf) if qf in opts else 92, key="tk_q1")
+            q2_ = c5.selectbox("...until", opts, index=opts.index(qt) if qt in opts else 24, key="tk_q2")
+            tz_ = c6.text_input("Your time zone", tzn, key="tk_tz")
+            st.markdown("**Optional morning summary** (one e-mail with your whole list, in addition to the alerts above)")
+            c7, c8, c9 = st.columns(3)
+            on = c7.checkbox("Send the morning summary", value=str(db.get_setting("tasks_digest_on", "false")).lower() == "true", key="tk_on")
+            tm = c8.selectbox("Summary time", opts, index=opts.index(tasks.fmt_time(db.get_setting("tasks_send_time", "08:00"))) if tasks.fmt_time(db.get_setting("tasks_send_time", "08:00")) in opts else 32, key="tk_time")
+            wk = c9.checkbox("Also on Saturday and Sunday", value=str(db.get_setting("tasks_weekends", "false")).lower() == "true", key="tk_wk")
             if st.form_submit_button("💾 Save"):
                 try:
-                    ZoneInfo(tzn)
-                    hh, mm = tm.split(":")
-                    assert 0 <= int(hh) < 24 and 0 <= int(mm) < 60
+                    ZoneInfo(tz_)
                 except Exception:
-                    st.error("Time zone must look like Asia/Dhaka and the time like 08:00.")
+                    st.error("Time zone must look like Asia/Dhaka.")
                 else:
+                    db.set_setting("tasks_default_time", tasks.parse_time(dt_))
+                    db.set_setting("tasks_followup_minutes", str(int(fm)))
+                    db.set_setting("tasks_followup_max", str(int(fx)))
+                    db.set_setting("tasks_quiet_from", tasks.parse_time(q1_))
+                    db.set_setting("tasks_quiet_to", tasks.parse_time(q2_))
+                    db.set_setting("tasks_timezone", tz_)
                     db.set_setting("tasks_digest_on", "true" if on else "false")
+                    db.set_setting("tasks_send_time", tasks.parse_time(tm))
                     db.set_setting("tasks_weekends", "true" if wk else "false")
-                    db.set_setting("tasks_send_time", f"{int(hh):02d}:{int(mm):02d}")
-                    db.set_setting("tasks_timezone", tzn)
                     set_flash("flash_tasks", "ok", "Saved.")
                     st.rerun()
-        st.caption("The e-mail goes to the admin e-mail address(es) in Settings. You can edit its wording on the Email templates tab (\"My daily task list\").")
-        text, count = tasks.digest_text(td)
-        if st.button("📧 Send me the list now", key="task_now"):
-            if not count:
-                st.info("Nothing to send: no task has reached its alert date or work date yet.")
-            elif tasks.run_digest(force=True):
-                st.success("Queued. It is sent by the next engine run (within about 5 minutes).")
-            else:
-                st.warning("Could not queue it. Check that the rule \"My daily task list\" is switched on in the Emails tab.")
-        if count:
-            st.text(text)
+        st.caption("E-mails go to the admin e-mail address(es) in Settings. You can change the wording on the Email templates tab "
+                   "(\"My tasks: alert and follow-up\"). First alerts are always sent at their time; only follow-ups wait for quiet hours to end.")
+        if st.button("📧 Check and send task e-mails now", key="task_now"):
+            a, f = tasks.run_alerts()
+            res = mailer.process_outbox() if (a or f) else None
+            st.success(f"{a} task(s) alerted, {f} follow-up(s). " + (f"E-mail: {res}" if res else "Nothing is due right now."))
+
+
+def tasks_tz_now():
+    """Current time in the tasks time zone (Dhaka by default), AM/PM, for the 'Page loaded' line."""
+    import tasks
+    return tasks.local_now().strftime("%a %d %b %Y, %I:%M:%S %p") + f" ({db.get_setting('tasks_timezone', 'Asia/Dhaka')})"
 
 
 PAGES = {"📊 Dashboard": page_dashboard, "📑 Reports": page_reports, "🧑‍💼 Publishers": page_publishers,
@@ -1634,7 +1792,16 @@ PAGES = {"📊 Dashboard": page_dashboard, "📑 Reports": page_reports, "🧑�
 if mailer.is_dry_run():
     st.warning("🧪 DRY RUN is ON: alerts are created but emails are NOT really sent. Turn it off in Settings when you are ready.")
 st.title("📞 Pay-Per-Call Alert Center")
-page = st.radio("Menu", list(PAGES), horizontal=True, label_visibility="collapsed", key="page")
+mc, rc_ = st.columns([8, 1])
+page = mc.radio("Menu", list(PAGES), horizontal=True, label_visibility="collapsed", key="page")
+if rc_.button("🔄 Refresh", key="refresh_page", help="Reload this page with the newest data", use_container_width=True):
+    try:
+        db._memo.clear()
+        st.cache_data.clear()
+    except Exception:
+        pass
+    st.rerun()
+st.caption(f"Page loaded {tasks_tz_now()}")
 try:
     PAGES[page]()
 except Exception as e:  # show errors on screen instead of a blank page

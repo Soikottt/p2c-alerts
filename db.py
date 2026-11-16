@@ -32,7 +32,12 @@ SETTING_DEFAULTS = {
     "inbox_next_run": "",          # (internal) after a failure, wait 30 minutes
     "did_reminder_days": "3",      # nobody answered an inactive-DID email: remind again after N days (0 = never remind)
     "pubcaps_sync_minutes": "60",  # how often publisher caps are re-read from the Ringba campaigns
-    "tasks_digest_on": "true",     # My Tasks: e-mail the daily list
+    "tasks_digest_on": "false",    # My Tasks: an extra morning summary of the whole list (the real-time alerts are separate)
+    "tasks_default_time": "09:00", # alert time used when a task has none
+    "tasks_followup_minutes": "30",# still not done after this many minutes -> follow-up e-mail (0 = no follow-ups)
+    "tasks_followup_max": "10",    # at most this many follow-ups per task alert
+    "tasks_quiet_from": "23:00",   # no FOLLOW-UP e-mails between these two times (first alerts always go)
+    "tasks_quiet_to": "06:00",
     "tasks_send_time": "08:00",    # ... at this time (in tasks_timezone)
     "tasks_timezone": "Asia/Dhaka",
     "tasks_weekends": "false",     # also send on Saturday / Sunday

@@ -8,9 +8,47 @@ from zoneinfo import ZoneInfo
 import alerts
 import db
 
-REPEATS = ["none", "daily", "weekdays", "weekly", "monthly"]
+REPEATS = ["none", "daily", "weekdays", "weekly", "monthly", "custom"]
 REPEAT_LABEL = {"none": "Does not repeat", "daily": "Every day", "weekdays": "Every weekday (Mon-Fri)",
-                "weekly": "Every week", "monthly": "Every month"}
+                "weekly": "Every week", "monthly": "Every month", "custom": "Every N days (you choose N)"}
+REPEATING = ("daily", "weekdays", "weekly", "monthly", "custom")
+
+
+def time_options():
+    """'12:00 AM', '12:15 AM' ... '11:45 PM'"""
+    return [f"{(h % 12) or 12:02d}:{m:02d} {'AM' if h < 12 else 'PM'}" for h in range(24) for m in range(0, 60, 15)]
+
+
+def fmt_time(hhmm):
+    """'21:30' -> '09:30 PM'"""
+    try:
+        h, m = str(hhmm).split(":")[:2]
+        h, m = int(h), int(m)
+        return f"{(h % 12) or 12:02d}:{m:02d} {'AM' if h < 12 else 'PM'}"
+    except (ValueError, AttributeError):
+        return ""
+
+
+def parse_time(v):
+    """'09:30 PM' (or '21:30') -> '21:30'. Returns None when empty / not a time."""
+    v = (v or "").strip().upper()
+    if not v:
+        return None
+    try:
+        if v.endswith(("AM", "PM")):
+            t = datetime.strptime(v.replace(" ", ""), "%I:%M%p")
+        else:
+            t = datetime.strptime(v, "%H:%M")
+        return f"{t.hour:02d}:{t.minute:02d}"
+    except ValueError:
+        return None
+
+
+def fmt_dt(dt):
+    """A stored (UTC) time shown in YOUR time zone, AM/PM:  Mon 16 Nov 2026, 07:56 PM"""
+    if not dt:
+        return ""
+    return db.to_dt(dt).astimezone(local_tz()).strftime("%a %d %b %Y, %I:%M %p")
 
 
 def local_tz():
@@ -52,7 +90,7 @@ def log(task_id, title, event, detail=""):
          i=task_id, t=title, n=db.now_utc(), e=event, d=detail)
 
 
-def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", now=None):
+def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", alert_time=None, repeat_days=None, now=None):
     title = (title or "").strip()
     if not title:
         raise ValueError("Please write what the task is.")
@@ -60,15 +98,26 @@ def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", no
     ad = pdate(alert_date) or wd
     if repeat not in REPEATS:
         repeat = "none"
-    rows = db.q("INSERT INTO tasks (title, notes, work_date, alert_date, repeat, status, created_at, updated_at) "
-                "VALUES (:t,:n,:w,:a,:r,'open',:now,:now) RETURNING id",
-                t=title, n=(notes or "").strip(), w=iso(wd), a=iso(ad), r=repeat, now=db.now_utc())
+    at = parse_time(alert_time) or default_time()
+    rd = max(int(repeat_days), 1) if (repeat == "custom" and repeat_days) else (1 if repeat == "custom" else None)
+    rows = db.q("INSERT INTO tasks (title, notes, work_date, alert_date, alert_time, repeat, repeat_days, status, alert_count, created_at, updated_at) "
+                "VALUES (:t,:n,:w,:a,:at,:r,:rd,'open',0,:now,:now) RETURNING id",
+                t=title, n=(notes or "").strip(), w=iso(wd), a=iso(ad), at=at, r=repeat, rd=rd, now=db.now_utc())
     tid = rows[0]["id"]
-    log(tid, title, "created", f"work {iso(wd)}, alert {iso(ad)}, {REPEAT_LABEL[repeat]}")
+    log(tid, title, "created", f"work {iso(wd)}, alert {iso(ad)} {fmt_time(at)}, {repeat_label(repeat, rd)}")
     return tid
 
 
-FIELDS = ("title", "notes", "work_date", "alert_date", "repeat")
+def default_time():
+    return parse_time(db.get_setting("tasks_default_time", "09:00")) or "09:00"
+
+
+def repeat_label(repeat, days=None):
+    return f"Every {int(days or 1)} day(s)" if repeat == "custom" else REPEAT_LABEL.get(repeat, repeat)
+
+
+FIELDS = ("title", "notes", "work_date", "alert_date", "alert_time", "repeat", "repeat_days")
+RESET_ALERT_ON = ("work_date", "alert_date", "alert_time", "repeat", "repeat_days")     # a changed schedule starts the alert again
 
 
 def update_task(task_id, **new):
@@ -85,6 +134,10 @@ def update_task(task_id, **new):
             v = iso(v)
         elif f == "repeat":
             v = v if v in REPEATS else "none"
+        elif f == "alert_time":
+            v = parse_time(v) or default_time()
+        elif f == "repeat_days":
+            v = max(int(v), 1) if v not in (None, "") else None
         else:
             v = (v or "").strip()
             if f == "title" and not v:
@@ -92,11 +145,17 @@ def update_task(task_id, **new):
         cur = old[f] or ("" if f in ("title", "notes") else None)
         if f in ("work_date", "alert_date"):
             cur = iso(cur)
+        if f == "alert_time":
+            cur = cur or default_time()
+        if f == "repeat_days" and old["repeat"] != "custom" and (new.get("repeat") or old["repeat"]) != "custom":
+            continue                                   # the number only matters for 'Every N days'
         if (cur or None) != (v or None):
             changes.append(f"{f}: '{cur or ''}' -> '{v or ''}'")
             sets.append(f"{f}=:{f}")
             params[f] = v
     if sets:
+        if any(c.split(":")[0] in RESET_ALERT_ON for c in changes):
+            sets += ["alert_count=0", "last_alert_at=NULL"]
         db.x(f"UPDATE tasks SET {', '.join(sets)}, updated_at=:now WHERE id=:i", **params)
         log(task_id, params.get("title") or old["title"], "changed", "; ".join(changes))
     return [c.split(":")[0] for c in changes]
@@ -108,7 +167,7 @@ def _add_months(d, n):
     return date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
 
 
-def next_work_date(work, repeat, after):
+def next_work_date(work, repeat, after, every=1):
     """The first repeat date that is later than `after`."""
     d, k = work, 0
     while d <= after and k < 800:
@@ -121,6 +180,8 @@ def next_work_date(work, repeat, after):
                 d = d + timedelta(days=1)
         elif repeat == "weekly":
             d = d + timedelta(days=7)
+        elif repeat == "custom":
+            d = d + timedelta(days=max(int(every or 1), 1))
         elif repeat == "monthly":
             d = _add_months(work, k)
         else:
@@ -134,12 +195,12 @@ def mark_done(task_id, now=None):
     if not t or t["status"] == "done":
         return
     n = db.now_utc() if now is None else now
-    if t["repeat"] in ("daily", "weekdays", "weekly", "monthly"):
+    if t["repeat"] in REPEATING:
         wd = pdate(t["work_date"]) or today(now)
         ad = pdate(t["alert_date"]) or wd
         offset = max((wd - ad).days, 0)
-        nxt = next_work_date(wd, t["repeat"], max(today(now), wd))
-        db.x("UPDATE tasks SET work_date=:w, alert_date=:a, updated_at=:n WHERE id=:i",
+        nxt = next_work_date(wd, t["repeat"], max(today(now), wd), t["repeat_days"])
+        db.x("UPDATE tasks SET work_date=:w, alert_date=:a, alert_count=0, last_alert_at=NULL, updated_at=:n WHERE id=:i",
              w=iso(nxt), a=iso(nxt - timedelta(days=offset)), n=n, i=task_id)
         log(task_id, t["title"], "done", f"repeats: next work date {iso(nxt)}")
     else:
@@ -150,7 +211,7 @@ def mark_done(task_id, now=None):
 def reopen(task_id):
     t = db.q1("SELECT * FROM tasks WHERE id=:i", i=task_id)
     if t and t["status"] == "done":
-        db.x("UPDATE tasks SET status='open', done_at=NULL, updated_at=:n WHERE id=:i", n=db.now_utc(), i=task_id)
+        db.x("UPDATE tasks SET status='open', done_at=NULL, alert_count=0, last_alert_at=NULL, updated_at=:n WHERE id=:i", n=db.now_utc(), i=task_id)
         log(task_id, t["title"], "reopened", "")
 
 
@@ -230,3 +291,141 @@ def run_digest(now=None, force=False):
     ctx = {"date": f"{td:%a %d %b %Y}", "count": str(count), "task_list": text}
     key = f"tasks:{td.isoformat()}" + (f":now{int((now or db.now_utc()).timestamp())}" if force else "")
     return 1 if alerts.create_alert("task_digest", key, ctx) else 0
+
+
+# ------------------------------------------------------------------ real-time alerts and follow-ups
+def alert_dt(t):
+    """When this task's alert is due: alert date + alert time in YOUR time zone (an aware datetime), or None."""
+    d = pdate(t["alert_date"]) or pdate(t["work_date"])
+    if not d:
+        return None
+    hh, mm = (parse_time(t.get("alert_time")) or default_time()).split(":")
+    return datetime(d.year, d.month, d.day, int(hh), int(mm), tzinfo=local_tz())
+
+
+def followup_minutes():
+    try:
+        return max(int(float(db.get_setting("tasks_followup_minutes", "30") or 0)), 0)
+    except ValueError:
+        return 30
+
+
+def followup_max():
+    try:
+        return max(int(float(db.get_setting("tasks_followup_max", "10") or 0)), 0)
+    except ValueError:
+        return 10
+
+
+def in_quiet_hours(now=None):
+    """True when follow-ups must wait (default 11:00 PM - 06:00 AM, your time)."""
+    a, b = parse_time(db.get_setting("tasks_quiet_from", "23:00")), parse_time(db.get_setting("tasks_quiet_to", "06:00"))
+    if not a or not b or a == b:
+        return False
+    cur = local_now(now).strftime("%H:%M")
+    return (a <= cur < b) if a < b else (cur >= a or cur < b)
+
+
+def state_of(t, now=None):
+    """What you should do with this open task:
+    'action'   the alert was sent and the task is still not done (or its work date is over)
+    'due'      the alert time has come, the e-mail goes out at the next engine run (within 5 minutes)
+    'upcoming' the alert time is later"""
+    now = now or db.now_utc()
+    wd = pdate(t["work_date"])
+    if (t.get("alert_count") or 0) > 0 or (wd and wd < today(now)):
+        return "action"
+    adt = alert_dt(t)
+    if adt is not None and adt <= now:
+        return "due"
+    return "upcoming"
+
+
+STATE_LABEL = {"action": "🔴 ACTION NEEDED", "due": "🟠 DUE NOW", "upcoming": "⚪ Upcoming"}
+
+
+def next_alert_text(t, now=None):
+    """Plain words for the 'Next alert' column."""
+    now = now or db.now_utc()
+    n = t.get("alert_count") or 0
+    adt = alert_dt(t)
+    if n == 0:
+        if adt is None:
+            return ""
+        return ("sending within 5 min" if adt <= now else adt.strftime("%a %d %b, %I:%M %p"))
+    fm = followup_minutes()
+    if fm == 0:
+        return f"alerted {n}x (no follow-ups)"
+    if n - 1 >= followup_max() > 0:
+        return f"alerted {n}x - follow-ups finished"
+    last = db.to_dt(t["last_alert_at"]) if t.get("last_alert_at") else None
+    if not last:
+        return ""
+    due = (last + timedelta(minutes=fm)).astimezone(local_tz())
+    return f"follow-up #{n} at {due.strftime('%I:%M %p')}"
+
+
+def _task_lines(items, now, followup):
+    tz = local_tz()
+    out = []
+    for i, t in enumerate(items, 1):
+        wd, adt = pdate(t["work_date"]), alert_dt(t)
+        bits = []
+        if wd:
+            bits.append(f"work date {wd:%a %d %b}")
+        if adt:
+            bits.append(f"alert {adt:%a %d %b, %I:%M %p}")
+        if followup:
+            bits.append(f"alerted {t['alert_count']}x already")
+        line = f"{i}. {t['title']}"
+        if bits:
+            line += "\n   " + " | ".join(bits)
+        if (t["notes"] or "").strip():
+            line += "\n   Note: " + " ".join(t["notes"].split())[:300]
+        out.append(line)
+    return "\n\n".join(out)          # a blank line between tasks, so they are easy to tell apart in the e-mail
+
+
+def _send_group(items, now, heading, followup, key):
+    app_url = (db.get_setting("app_url", "") or "").strip()
+    fm, fmax = followup_minutes(), followup_max()
+    note = (f"If you do not tick Done in the app, a follow-up comes every {fm} minutes" + (f" (up to {fmax} times)." if fmax else ".")) if fm else ""
+    ctx = {"heading": heading, "count": str(len(items)), "first_title": items[0]["title"],
+           "now": local_now(now).strftime("%a %d %b %Y, %I:%M %p") + f" ({db.get_setting('tasks_timezone', 'Asia/Dhaka')})",
+           "task_list": _task_lines(items, now, followup), "app_url": app_url or "(set the app address in Settings)",
+           "followup_note": note}
+    if not alerts.create_alert("task_alert", key, ctx):
+        return 0
+    ids = [t["id"] for t in items]
+    db.x_in("UPDATE tasks SET alert_count = alert_count + 1, last_alert_at = :n WHERE id IN :ids", "ids", ids, n=now)
+    for t in items:
+        log(t["id"], t["title"], "follow-up sent" if followup else "alert sent", f"#{(t['alert_count'] or 0) + 1}")
+    return len(items)
+
+
+def run_alerts(now=None):
+    """Called by the engine (every 5 minutes). Sends ONE e-mail for the tasks whose alert time has come, and ONE follow-up e-mail for
+    tasks that were alerted but are still not done after the follow-up time. Returns (new alerts, follow-ups)."""
+    now = now or db.now_utc()
+    firsts, follows = [], []
+    fm, fmax, quiet = followup_minutes(), followup_max(), None
+    for t in open_tasks():
+        adt = alert_dt(t)
+        if adt is None or adt > now:
+            continue
+        n = t["alert_count"] or 0
+        if n == 0:
+            firsts.append(t)
+            continue
+        if fm == 0 or (fmax and n - 1 >= fmax):
+            continue
+        last = db.to_dt(t["last_alert_at"]) if t["last_alert_at"] else None
+        if last is None or now - last >= timedelta(minutes=fm):
+            if quiet is None:
+                quiet = in_quiet_hours(now)
+            if not quiet:
+                follows.append(t)
+    stamp = f"{now:%Y%m%d%H%M}"
+    a = _send_group(firsts, now, "Task alert", False, f"taskalert:{stamp}") if firsts else 0
+    f = _send_group(follows, now, "Follow-up: still not done", True, f"taskfollow:{stamp}") if follows else 0
+    return a, f

@@ -447,3 +447,16 @@ On the **Caps** tab, "Publisher caps per campaign" is filled in from Ringba by i
 - A "global" default payout cap (shared by all publishers) is skipped, because it is not a per-publisher cap. If a publisher has several payout rules with a cap, the first one is used (the note says so).
 - Ringba's cap day follows the time zone inside the payout rule (for example Eastern). Ours follows "Day starts at" and the Timezone in Settings: set them the same.
 - If the button says "No cap found", it prints the field names Ringba returned. Send me that line and I will adjust.
+
+### My Tasks v2: real-time alerts, follow-ups, AM/PM Dhaka time
+- Each task has a **work date**, an **alert date** and an **alert time** (pick-list, AM/PM, Dhaka time). **Repeat** can now also be **Every N days** (you type N).
+- At the alert date + time you get an e-mail (tasks due at the same time are in one e-mail). If you do not tick **Done**, a **follow-up** comes every **30 minutes** (change it in *E-mail settings*; 0 = never; default maximum 10 follow-ups; none between 11:00 PM and 06:00 AM, they continue after). The engine runs every 5 minutes, so an e-mail can be up to 5 minutes late.
+- The list shows 🔴 **ACTION NEEDED** (alert sent, not done, or the work date has passed), 🟠 **DUE NOW**, ⚪ Upcoming, with a "Next e-mail" column. Tick Done + **Save changes**. Changing a task's date or time starts its alert again. All times are shown in Dhaka time, AM/PM.
+- The old morning summary is now optional and OFF by default (E-mail settings).
+- Wording: Email templates tab, "My tasks: alert and follow-up".
+
+### Alert Log: colours and filters, Refresh on every page
+- Alert Log has a **State** column and coloured rows: 🔴 NEEDS ACTION (red, sorted to the top), 🟡 WAITING (yellow), 🟢 DONE (green), ⚪ INFO. Counters and a quick filter sit above the table.
+- Every table has a **search box** and a **Filters** box (pick values from status, type, publisher ...). "Clear filters" resets them. Unsaved edits in an editable table are dropped when you change a filter, so save first.
+- Every page has a **🔄 Refresh** button next to the menu, and shows when the page was loaded.
+- The Alert Log column order / width is saved separately from before (new table name), so the new State column comes first.

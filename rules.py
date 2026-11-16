@@ -357,8 +357,12 @@ def rule_new_dids_no_calls(now):
 
 
 def rule_task_digest(now):
+    """My Tasks: real-time alerts (at each task's own date + time), follow-ups while a task is not done, and the optional morning summary."""
     import tasks
-    return tasks.run_digest(now)
+    if not alerts.rule_enabled("task_alert"):
+        return tasks.run_digest(now)
+    a, f = tasks.run_alerts(now)
+    return a + f + tasks.run_digest(now)
 
 
 def run_all(now=None, log=None, max_new=None, seconds=None):
