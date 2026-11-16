@@ -8,10 +8,90 @@ from zoneinfo import ZoneInfo
 import alerts
 import db
 
-REPEATS = ["none", "daily", "weekdays", "weekly", "monthly", "custom"]
+REPEATS = ["none", "daily", "weekdays", "weekly", "monthly", "custom", "pick_weekdays", "pick_monthdays", "pick_dates"]
 REPEAT_LABEL = {"none": "Does not repeat", "daily": "Every day", "weekdays": "Every weekday (Mon-Fri)",
-                "weekly": "Every week", "monthly": "Every month", "custom": "Every N days (you choose N)"}
-REPEATING = ("daily", "weekdays", "weekly", "monthly", "custom")
+                "weekly": "Every week", "monthly": "Every month", "custom": "Every N days (you choose N)",
+                "pick_weekdays": "On the weekdays I choose (e.g. every Monday and Tuesday)",
+                "pick_monthdays": "On the days of the month I choose (e.g. the 15th and 20th)",
+                "pick_dates": "On the exact dates I choose"}
+REPEAT_SHORT = {"none": "No repeat", "daily": "Every day", "weekdays": "Mon-Fri", "weekly": "Every week", "monthly": "Every month",
+                "custom": "Every N days", "pick_weekdays": "Chosen weekdays", "pick_monthdays": "Chosen month days", "pick_dates": "Chosen dates"}
+PICK = ("pick_weekdays", "pick_monthdays", "pick_dates")
+REPEATING = ("daily", "weekdays", "weekly", "monthly", "custom") + PICK
+WD_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+MONTH_DAY_CHOICES = [str(i) for i in range(1, 32)] + ["last"]
+
+
+# ---- "my own days": chosen weekdays / days of the month / exact dates
+def parse_rule(repeat, value):
+    """What the person typed or picked -> the saved rule text. Raises ValueError with a plain message."""
+    import re
+    parts = [str(x) for x in value] if isinstance(value, (list, tuple, set)) else re.split(r"[,\s;]+", str(value or "").strip())
+    parts = [p for p in parts if p]
+    if not parts:
+        raise ValueError({"pick_weekdays": "Choose at least one weekday.", "pick_monthdays": "Choose at least one day of the month.",
+                          "pick_dates": "Type at least one date, like 2026-12-15."}[repeat])
+    if repeat == "pick_weekdays":
+        names = [n.lower() for n in WD_NAMES]
+        idx = set()
+        for p in parts:
+            if p.lower()[:3] not in names:
+                raise ValueError(f"'{p}' is not a weekday (use Mon, Tue, Wed ...).")
+            idx.add(names.index(p.lower()[:3]))
+        return ",".join(str(i) for i in sorted(idx))
+    if repeat == "pick_monthdays":
+        days = set()
+        for p in parts:
+            if p.lower() in ("last", "end", "99"):
+                days.add(99)
+            elif p.isdigit() and 1 <= int(p) <= 31:
+                days.add(int(p))
+            else:
+                raise ValueError(f"'{p}' is not a day of the month (use 1 to 31, or last).")
+        return ",".join(str(i) for i in sorted(days))
+    ds = set()
+    for p in parts:
+        d = pdate(p) if len(p) >= 10 else None
+        if not d:
+            raise ValueError(f"'{p}' is not a date. Write it like 2026-12-15.")
+        ds.add(d.isoformat())
+    return ",".join(sorted(ds))
+
+
+def rule_text(repeat, rule):
+    """The saved rule in plain words: 'Mon, Tue' / '15, 20, last' / '2026-12-01, 2026-12-15'."""
+    items = [x for x in str(rule or "").split(",") if x]
+    if repeat == "pick_weekdays":
+        return ", ".join(WD_NAMES[int(i)] for i in items)
+    if repeat == "pick_monthdays":
+        return ", ".join("last" if i == "99" else i for i in items)
+    return ", ".join(items)
+
+
+def matches(d, repeat, rule):
+    items = [x for x in str(rule or "").split(",") if x]
+    if repeat == "pick_weekdays":
+        return str(d.weekday()) in items
+    if repeat == "pick_monthdays":
+        last = calendar.monthrange(d.year, d.month)[1]
+        return d.day in {last if int(i) == 99 else min(int(i), last) for i in items}
+    return d.isoformat() in items
+
+
+def next_after(repeat, rule, after):
+    """The first chosen date later than `after`, or None (all chosen dates are over)."""
+    if repeat == "pick_dates":
+        later = sorted(x for x in str(rule or "").split(",") if x and x > after.isoformat())
+        return date.fromisoformat(later[0]) if later else None
+    for i in range(1, 800):
+        d = after + timedelta(days=i)
+        if matches(d, repeat, rule):
+            return d
+    return None
+
+
+def first_on_or_after(repeat, rule, d):
+    return d if matches(d, repeat, rule) else next_after(repeat, rule, d)
 
 
 def time_options():
@@ -90,7 +170,7 @@ def log(task_id, title, event, detail=""):
          i=task_id, t=title, n=db.now_utc(), e=event, d=detail)
 
 
-def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", alert_time=None, repeat_days=None, now=None):
+def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", alert_time=None, repeat_days=None, repeat_rule=None, now=None):
     title = (title or "").strip()
     if not title:
         raise ValueError("Please write what the task is.")
@@ -98,13 +178,20 @@ def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", al
     ad = pdate(alert_date) or wd
     if repeat not in REPEATS:
         repeat = "none"
+    rule = None
+    if repeat in PICK:
+        rule = parse_rule(repeat, repeat_rule)
+        first = first_on_or_after(repeat, rule, wd)
+        if first is None:
+            raise ValueError("All the dates you chose are already in the past.")
+        ad, wd = first - (wd - ad), first               # the first work date is the first chosen day; the alert keeps its distance
     at = parse_time(alert_time) or default_time()
     rd = max(int(repeat_days), 1) if (repeat == "custom" and repeat_days) else (1 if repeat == "custom" else None)
-    rows = db.q("INSERT INTO tasks (title, notes, work_date, alert_date, alert_time, repeat, repeat_days, status, alert_count, created_at, updated_at) "
-                "VALUES (:t,:n,:w,:a,:at,:r,:rd,'open',0,:now,:now) RETURNING id",
-                t=title, n=(notes or "").strip(), w=iso(wd), a=iso(ad), at=at, r=repeat, rd=rd, now=db.now_utc())
+    rows = db.q("INSERT INTO tasks (title, notes, work_date, alert_date, alert_time, repeat, repeat_days, repeat_rule, status, alert_count, created_at, updated_at) "
+                "VALUES (:t,:n,:w,:a,:at,:r,:rd,:rr,'open',0,:now,:now) RETURNING id",
+                t=title, n=(notes or "").strip(), w=iso(wd), a=iso(ad), at=at, r=repeat, rd=rd, rr=rule, now=db.now_utc())
     tid = rows[0]["id"]
-    log(tid, title, "created", f"work {iso(wd)}, alert {iso(ad)} {fmt_time(at)}, {repeat_label(repeat, rd)}")
+    log(tid, title, "created", f"work {iso(wd)}, alert {iso(ad)} {fmt_time(at)}, {repeat_label(repeat, rd, rule)}")
     return tid
 
 
@@ -112,12 +199,16 @@ def default_time():
     return parse_time(db.get_setting("tasks_default_time", "09:00")) or "09:00"
 
 
-def repeat_label(repeat, days=None):
-    return f"Every {int(days or 1)} day(s)" if repeat == "custom" else REPEAT_LABEL.get(repeat, repeat)
+def repeat_label(repeat, days=None, rule=None):
+    if repeat == "custom":
+        return f"Every {int(days or 1)} day(s)"
+    if repeat in PICK:
+        return {"pick_weekdays": "Every ", "pick_monthdays": "On day ", "pick_dates": "On "}[repeat] + rule_text(repeat, rule)
+    return REPEAT_LABEL.get(repeat, repeat)
 
 
-FIELDS = ("title", "notes", "work_date", "alert_date", "alert_time", "repeat", "repeat_days")
-RESET_ALERT_ON = ("work_date", "alert_date", "alert_time", "repeat", "repeat_days")     # a changed schedule starts the alert again
+FIELDS = ("title", "notes", "work_date", "alert_date", "alert_time", "repeat", "repeat_days", "repeat_rule")
+RESET_ALERT_ON = ("work_date", "alert_date", "alert_time", "repeat", "repeat_days", "repeat_rule")     # a changed schedule starts the alert again
 
 
 def update_task(task_id, **new):
@@ -138,6 +229,9 @@ def update_task(task_id, **new):
             v = parse_time(v) or default_time()
         elif f == "repeat_days":
             v = max(int(v), 1) if v not in (None, "") else None
+        elif f == "repeat_rule":
+            eff = new.get("repeat") or old["repeat"]
+            v = parse_rule(eff, v) if eff in PICK else None
         else:
             v = (v or "").strip()
             if f == "title" and not v:
@@ -153,6 +247,23 @@ def update_task(task_id, **new):
             changes.append(f"{f}: '{cur or ''}' -> '{v or ''}'")
             sets.append(f"{f}=:{f}")
             params[f] = v
+    eff_rep = params.get("repeat", old["repeat"])
+    eff_rule = params.get("repeat_rule", old["repeat_rule"])
+    if eff_rep in PICK and not eff_rule:
+        raise ValueError("Choose the days for this repeat.")
+    if eff_rep not in PICK and old["repeat_rule"] and "repeat_rule" not in params:
+        sets.append("repeat_rule=NULL")                 # switched to a normal repeat: forget the chosen days
+    if eff_rep in PICK and eff_rule and sets:
+        wd = pdate(params.get("work_date", old["work_date"]))
+        ad = pdate(params.get("alert_date", old["alert_date"])) or wd
+        if wd and not matches(wd, eff_rep, eff_rule):     # the work date must be one of the chosen days: move it to the next one
+            nxt = next_after(eff_rep, eff_rule, wd)
+            if nxt:
+                params["work_date"], params["alert_date"] = iso(nxt), iso(nxt - (wd - ad))
+                for f in ("work_date", "alert_date"):
+                    if f"{f}=:{f}" not in sets:
+                        sets.append(f"{f}=:{f}")
+                changes.append(f"work_date: moved to the next chosen day {params['work_date']}")
     if sets:
         if any(c.split(":")[0] in RESET_ALERT_ON for c in changes):
             sets += ["alert_count=0", "last_alert_at=NULL"]
@@ -199,7 +310,14 @@ def mark_done(task_id, now=None):
         wd = pdate(t["work_date"]) or today(now)
         ad = pdate(t["alert_date"]) or wd
         offset = max((wd - ad).days, 0)
-        nxt = next_work_date(wd, t["repeat"], max(today(now), wd), t["repeat_days"])
+        if t["repeat"] in PICK:
+            nxt = next_after(t["repeat"], t["repeat_rule"], max(today(now), wd))
+            if nxt is None:                               # the last chosen date: the task is finished for good
+                db.x("UPDATE tasks SET status='done', done_at=:n, updated_at=:n WHERE id=:i", n=n, i=task_id)
+                log(task_id, t["title"], "done", "last chosen date reached: task finished")
+                return
+        else:
+            nxt = next_work_date(wd, t["repeat"], max(today(now), wd), t["repeat_days"])
         db.x("UPDATE tasks SET work_date=:w, alert_date=:a, alert_count=0, last_alert_at=NULL, updated_at=:n WHERE id=:i",
              w=iso(nxt), a=iso(nxt - timedelta(days=offset)), n=n, i=task_id)
         log(task_id, t["title"], "done", f"repeats: next work date {iso(nxt)}")

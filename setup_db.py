@@ -69,6 +69,7 @@ ADD_COLUMNS = [
     ("caps", "source", "TEXT"),
     ("tasks", "alert_time", "TEXT"),
     ("tasks", "repeat_days", "INTEGER"),
+    ("tasks", "repeat_rule", "TEXT"),
     ("tasks", "last_alert_at", "TIMESTAMPTZ"),
     ("tasks", "alert_count", "INTEGER NOT NULL DEFAULT 0"),
     ("caps", "ringba_key", "TEXT"),
@@ -187,7 +188,7 @@ def ensure_columns():
         db.q1("SELECT ringba_target_id FROM targets LIMIT 1")
         db.q1("SELECT thread_id FROM alerts LIMIT 1")
         db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
-        db.q1("SELECT title, alert_time, repeat_days, last_alert_at, alert_count FROM tasks LIMIT 1")
+        db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count FROM tasks LIMIT 1")
         db.q1("SELECT event FROM task_log LIMIT 1")
         return False
     except Exception:

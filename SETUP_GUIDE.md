@@ -460,3 +460,15 @@ On the **Caps** tab, "Publisher caps per campaign" is filled in from Ringba by i
 - Every table has a **search box** and a **Filters** box (pick values from status, type, publisher ...). "Clear filters" resets them. Unsaved edits in an editable table are dropped when you change a filter, so save first.
 - Every page has a **🔄 Refresh** button next to the menu, and shows when the page was loaded.
 - The Alert Log column order / width is saved separately from before (new table name), so the new State column comes first.
+
+### Task repeat: your own days
+Repeat now also has three "choose your own" options (the extra box appears when you pick one):
+- **On the weekdays I choose**: pick one or more, e.g. Mon + Tue = every Monday and every Tuesday.
+- **On the days of the month I choose**: pick one or more, e.g. 15 and 20 (or **last** for the last day). In a short month the last day is used (31 in February = 28).
+- **On the exact dates I choose**: type any dates, e.g. `2026-12-01, 2026-12-15, 2027-01-10`. After the last date the task is finished.
+When you tick Done the task moves to the next chosen day and the alert comes again (same alert distance and time). The first work date is moved to the first chosen day. In the table, change **Repeat** and **Repeat details** (e.g. `Mon, Wed` or `15, 20, last`) and press Save changes.
+
+### Only publishers with an active DID
+- **Publisher caps** (Ringba or typed) only count and alert while that publisher has an **active DID** in that campaign. No active DID there (none at all, only retired ones, or a DID in another campaign) = the cap is not shown on the Dashboard, not counted and never alerts. Buyer caps are not affected. On the Caps tab, tick "Also show caps ... without an active DID" to see the hidden ones. When a DID is added or becomes active again, its caps come back by themselves.
+- If a DID's campaign is not known at all, it counts for every campaign of its publisher (so a real alert is never hidden because of missing data).
+- The **Publishers** tab shows only publishers with at least one active DID (new column "Active DIDs"). To add a publisher by hand, tick "Also show publishers that have no active DID".

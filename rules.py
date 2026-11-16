@@ -140,11 +140,15 @@ def cap_usage(cap, now):
 
 
 def rule_caps(now):
+    import dids as didtools
     made = 0
+    links = didtools.active_links()
     for cap in db.q("SELECT * FROM caps WHERE active = TRUE"):
         atype = f"{cap['entity_type']}_cap"
         if not alerts.rule_enabled(atype):
             continue
+        if not didtools.cap_has_active_did(cap, links):
+            continue                                   # no active DID for this publisher / campaign: nothing is counted or alerted
         u = cap_usage(cap, now)
         reached = [t for t in parse_thresholds(cap["thresholds"]) if u["pct"] >= t]
         if not reached:

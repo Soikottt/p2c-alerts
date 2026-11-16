@@ -247,6 +247,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   updated_at TIMESTAMPTZ,
   alert_time TEXT,
   repeat_days INTEGER,
+  repeat_rule TEXT,
   last_alert_at TIMESTAMPTZ,
   alert_count INTEGER NOT NULL DEFAULT 0
 );

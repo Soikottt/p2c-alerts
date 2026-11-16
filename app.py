@@ -109,7 +109,7 @@ def schema_ready():
         db.q1("SELECT ringba_target_id FROM targets LIMIT 1")
         db.q1("SELECT thread_id FROM alerts LIMIT 1")
         db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
-        db.q1("SELECT title, alert_time, repeat_days, last_alert_at, alert_count FROM tasks LIMIT 1")
+        db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count FROM tasks LIMIT 1")
         return True
     except Exception:
         return False
@@ -439,7 +439,10 @@ def page_dashboard():
         st.caption("No caps yet. Add them on the Caps page.")
     else:
         out = []
+        links = didtools.active_links()
         for c in caps:
+            if not didtools.cap_has_active_did(c, links):
+                continue                              # a publisher / campaign without an active DID is not shown or counted
             u = rules.cap_usage(c, now)
             out.append({"Type": c["entity_type"], "Name": u["name"], "Period": c["period"], "Counts": c["metric"],
                         "Used": u["usage"], "Cap": c["cap_value"], "Percent": round(u["pct"], 1)})
@@ -606,14 +609,20 @@ def page_publishers():
         if r["manager_id"] in mname:
             links.setdefault(r["publisher_id"], []).append(mname[r["manager_id"]])
     since = db.now_utc() - timedelta(days=30)
+    show_all = st.checkbox("Also show publishers that have no active DID (to add a new publisher by hand, tick this)", key="pubs_show_nodid")
     rows = db.q("""SELECT p.id, p.name, p.ringba_publisher_id, p.status, p.publisher_email, p.cc_publisher, p.extra_cc, p.notes,
                           (SELECT MAX(call_at) FROM calls WHERE publisher_id = p.id) AS last_call,
-                          (SELECT COUNT(*) FROM calls WHERE publisher_id = p.id AND call_at >= :s) AS calls_30d
+                          (SELECT COUNT(*) FROM calls WHERE publisher_id = p.id AND call_at >= :s) AS calls_30d,
+                          (SELECT COUNT(*) FROM dids WHERE publisher_id = p.id AND status = 'active') AS active_dids
                    FROM publishers p ORDER BY p.name""", s=since)
+    total = len(rows)
+    if not show_all:
+        rows = [r for r in rows if r["active_dids"]]
+        st.caption(f"Showing the {len(rows)} publishers that have at least one **active DID**" + (f" ({total - len(rows)} without one are hidden)." if total > len(rows) else "."))
     for r in rows:
         r["managers"] = ", ".join(sorted(links.get(r["id"], [])))
     cols = ["id", "name", "ringba_publisher_id", "status", "managers", "publisher_email", "cc_publisher", "extra_cc",
-            "notes", "last_call", "calls_30d"]
+            "notes", "last_call", "calls_30d", "active_dids"]
     df = frame(rows, cols)
     df["last_call"] = df["last_call"].map(lambda v: "never" if pd.isna(v) else fmt(v))
     df["cc_publisher"] = df["cc_publisher"].fillna(False).astype(bool)
@@ -635,9 +644,10 @@ def page_publishers():
            "extra_cc": st.column_config.TextColumn("Extra CC emails", help="Comma-separated. Always copied on this publisher's alerts."),
            "notes": st.column_config.TextColumn("Notes"),
            "last_call": st.column_config.TextColumn("Last call"),
-           "calls_30d": st.column_config.NumberColumn("Calls (30d)")}
+           "calls_30d": st.column_config.NumberColumn("Calls (30d)"),
+           "active_dids": st.column_config.NumberColumn("Active DIDs")}
     table_editor("pub", df, cfg, ["name", "ringba_publisher_id", "status", "publisher_email", "cc_publisher", "extra_cc", "notes"],
-                 "publishers", tf, required=("name",), disabled=["managers", "last_call", "calls_30d"],
+                 "publishers", tf, required=("name",), disabled=["managers", "last_call", "calls_30d", "active_dids"],
                  insert_extra={"created_at": db.now_utc()})
 
     st.subheader("Affiliate managers on CC")
@@ -865,14 +875,34 @@ def page_dids():
 def caps_section(entity_type, default_metric):
     table = "publishers" if entity_type == "publisher" else "buyers"
     by_campaign = entity_type == "publisher"
+    show_all = False
+    links = None
+    if by_campaign:
+        show_all = st.checkbox("Also show caps of publishers / campaigns without an active DID (they are never counted or alerted)",
+                               key="caps_show_nodid")
+        links = didtools.active_links()
     ents = db.q(f"SELECT id, name FROM {table} ORDER BY name")
+    if by_campaign and not show_all:
+        ents = [e for e in ents if e["id"] in links[0]]
     name2id = {e["name"]: e["id"] for e in ents}
     ALL = "(all campaigns)"
     campaigns = [ALL] + [r["campaign_name"] for r in db.q(
         "SELECT DISTINCT campaign_name FROM calls WHERE campaign_name IS NOT NULL AND call_at >= :s ORDER BY campaign_name",
         s=db.now_utc() - timedelta(days=120))]
-    rows = db.q(f"""SELECT c.id, c.entity_id, e.name AS name, c.campaign_name, c.period, c.metric, c.cap_value, c.thresholds, c.active, c.notes, c.source
+    rows = db.q(f"""SELECT c.id, c.entity_id, e.name AS name, c.campaign_name, c.period, c.metric, c.cap_value, c.thresholds, c.active, c.notes, c.source, c.ringba_key
                     FROM caps c JOIN {table} e ON e.id = c.entity_id WHERE c.entity_type = :t ORDER BY e.name, c.campaign_name""", t=entity_type)
+    if by_campaign:
+        hidden = 0
+        keep = []
+        for r in rows:
+            if show_all or didtools.cap_has_active_did({"entity_type": "publisher", "entity_id": r["entity_id"], "campaign_name": r["campaign_name"],
+                                                    "ringba_key": r.get("ringba_key")}, links):
+                keep.append(r)
+            else:
+                hidden += 1
+        rows = keep
+        if hidden:
+            st.caption(f"{hidden} cap(s) are hidden because that publisher has no active DID in that campaign.")
     now = db.now_utc()
     for r in rows:
         u = rules.cap_usage({"entity_type": entity_type, "entity_id": r["entity_id"], "period": r["period"],
@@ -1631,26 +1661,48 @@ def page_tasks():
                "The engine checks every 5 minutes, so an e-mail can be up to 5 minutes late.")
     opts = tasks.time_options()
     dflt = tasks.fmt_time(tasks.default_time())
-    with st.form("task_add", clear_on_submit=True):
-        title = st.text_input("Task (what to do)", key="task_title")
+    def add_task_cb():
+        ss = st.session_state
+        rep = ss.get("task_rep", "none")
+        rule = {"pick_weekdays": ss.get("task_wdays"), "pick_monthdays": ss.get("task_mdays"), "pick_dates": ss.get("task_dates")}.get(rep)
+        try:
+            tid = tasks.add_task(ss.get("task_title"), ss.get("task_notes"), ss.get("task_wd"), ss.get("task_ad"), rep, ss.get("task_at"),
+                                 ss.get("task_rdays") if rep == "custom" else None, rule)
+            row = db.q1("SELECT * FROM tasks WHERE id=:i", i=tid)
+            late = tasks.alert_dt(row) <= db.now_utc()
+            first = tasks.pdate(row["alert_date"])
+            set_flash("flash_tasks", "ok", "Task added. " + ("Its alert time has already passed, so the e-mail goes out within 5 minutes."
+                      if late else f"First e-mail: {first:%a %d %b %Y} at {ss.get('task_at')}.") +
+                      (f" It repeats: {tasks.repeat_label(rep, ss.get('task_rdays'), row['repeat_rule'])}." if rep != "none" else ""))
+            ss["task_title"] = ""
+            ss["task_notes"] = ""
+        except ValueError as e:
+            ss["task_err"] = str(e)
+
+    err_msg = st.session_state.pop("task_err", None)
+    if err_msg:
+        st.error(err_msg)
+    with st.container(border=True):
+        st.text_input("Task (what to do)", key="task_title")
         c1, c2, c3 = st.columns(3)
-        wd = c1.date_input("Work date (do it on)", td, key="task_wd")
-        ad = c2.date_input("Alert date (e-mail me on)", td, key="task_ad", help="Can be earlier than the work date.")
-        at_ = c3.selectbox("Alert time (AM/PM)", opts, index=opts.index(dflt) if dflt in opts else 36, key="task_at")
-        c4, c5 = st.columns(2)
-        rep = c4.selectbox("Repeat", tasks.REPEATS, format_func=lambda r: tasks.REPEAT_LABEL[r], key="task_rep",
+        c1.date_input("Work date (do it on)", td, key="task_wd")
+        c2.date_input("Alert date (e-mail me on)", td, key="task_ad", help="Can be earlier than the work date.")
+        c3.selectbox("Alert time (AM/PM)", opts, index=opts.index(dflt) if dflt in opts else 36, key="task_at")
+        rep = st.selectbox("Repeat", tasks.REPEATS, format_func=lambda r: tasks.REPEAT_LABEL[r], key="task_rep",
                            help="When you tick Done, a repeating task moves to its next date and the alert comes again.")
-        rdays = c5.number_input("N for 'Every N days'", 1, 365, 7, key="task_rdays", help="Only used when Repeat = Every N days.")
-        notes = st.text_area("Note (optional)", key="task_notes", height=70)
-        if st.form_submit_button("➕ Add task", type="primary"):
-            try:
-                tid = tasks.add_task(title, notes, wd, ad, rep, at_, rdays if rep == "custom" else None)
-                late = tasks.alert_dt(db.q1("SELECT * FROM tasks WHERE id=:i", i=tid)) <= now
-                set_flash("flash_tasks", "ok", "Task added." + (" Its alert time has already passed, so the e-mail goes out within 5 minutes." if late else
-                                                                  f" You get the e-mail on {ad:%a %d %b} at {at_}."))
-                st.rerun()
-            except ValueError as e:
-                st.error(str(e))
+        if rep == "custom":
+            st.number_input("Repeat every how many days?", 1, 365, 7, key="task_rdays")
+        elif rep == "pick_weekdays":
+            st.multiselect("Which days of the week?", tasks.WD_NAMES, default=["Mon"], key="task_wdays",
+                           help="Pick one or more. Example: Mon and Tue = every Monday and every Tuesday.")
+        elif rep == "pick_monthdays":
+            st.multiselect("Which days of the month?", tasks.MONTH_DAY_CHOICES, default=["15"], key="task_mdays",
+                           help="Pick one or more, for example 15 and 20. 'last' = the last day of the month. A short month uses its last day (31 in February = 28).")
+        elif rep == "pick_dates":
+            st.text_input("Which dates? (YYYY-MM-DD, separated by commas)", key="task_dates", placeholder="2026-12-01, 2026-12-15, 2027-01-10",
+                          help="Any dates you like. After the last one the task is finished.")
+        st.text_area("Note (optional)", key="task_notes", height=70)
+        st.button("➕ Add task", type="primary", key="task_add_btn", on_click=add_task_cb)
 
     rows = tasks.open_tasks()
     state = {r["id"]: tasks.state_of(r, now) for r in rows}
@@ -1674,19 +1726,20 @@ def page_tasks():
     else:
         df = pd.DataFrame([{"id": r["id"], "Done": False, "Status": tasks.STATE_LABEL[state[r["id"]]], "Task": r["title"],
                             "Work date": tasks.pdate(r["work_date"]), "Alert date": tasks.pdate(r["alert_date"]),
-                            "Alert time": tasks.fmt_time(r["alert_time"] or tasks.default_time()), "Repeat": r["repeat"],
-                            "Every N days": r["repeat_days"], "Next e-mail": tasks.next_alert_text(r, now),
+                            "Alert time": tasks.fmt_time(r["alert_time"] or tasks.default_time()), "Repeat": tasks.REPEAT_SHORT[r["repeat"]],
+                            "Repeat details": (str(r["repeat_days"] or "") if r["repeat"] == "custom" else tasks.rule_text(r["repeat"], r["repeat_rule"])),
+                            "Next e-mail": tasks.next_alert_text(r, now),
                             "Note": r["notes"] or "", "Remove": False} for r in shown])
-        df, sig = filter_bar("tasks", df, skip=("Task", "Note", "Next e-mail", "id"))
-        order = ["Done", "Status", "Task", "Work date", "Alert date", "Alert time", "Repeat", "Every N days", "Next e-mail", "Note", "Remove"]
+        df, sig = filter_bar("tasks", df, skip=("Task", "Note", "Next e-mail", "id", "Repeat details"))
+        order = ["Done", "Status", "Task", "Work date", "Alert date", "Alert time", "Repeat", "Repeat details", "Next e-mail", "Note", "Remove"]
         cfg = {"id": None, "Done": st.column_config.CheckboxColumn("Done", width="small"),
                "Status": st.column_config.TextColumn("Status", width="medium"),
                "Work date": st.column_config.DateColumn("Work date", format="ddd DD MMM YYYY"),
                "Alert date": st.column_config.DateColumn("Alert date", format="ddd DD MMM YYYY"),
                "Alert time": st.column_config.SelectboxColumn("Alert time", options=opts, required=True),
-               "Repeat": st.column_config.SelectboxColumn("Repeat", options=tasks.REPEATS, required=True),
-               "Every N days": st.column_config.NumberColumn("Every N days", min_value=1, max_value=365, step=1,
-                                                              help="Only for Repeat = custom"),
+               "Repeat": st.column_config.SelectboxColumn("Repeat", options=list(tasks.REPEAT_SHORT.values()), required=True),
+               "Repeat details": st.column_config.TextColumn("Repeat details", help="Every N days: the number. Chosen weekdays: Mon, Tue. "
+                                                             "Chosen month days: 15, 20, last. Chosen dates: 2026-12-01, 2026-12-15."),
                "Remove": st.column_config.CheckboxColumn("Remove", width="small", help="Deletes the task (the history stays)")}
         styled = df.style.apply(lambda r: [{"🔴": "background-color: rgba(255,75,75,0.18)", "🟠": "background-color: rgba(255,170,0,0.18)"}
                                             .get(str(r["Status"])[:1], "")] * len(r), axis=1) if len(df) else df
@@ -1698,20 +1751,35 @@ def page_tasks():
                                 disabled=["id", "Status", "Next e-mail"], column_order=order, column_config=cfg)
         if st.button("💾 Save changes", type="primary", key="task_save"):
             done = changed = removed = 0
+            errs = []
+            back = {v: k for k, v in tasks.REPEAT_SHORT.items()}
             for i in range(len(df)):
                 o, n = df.iloc[i], ed.iloc[i]
                 tid = int(o["id"])
                 if n["Remove"]:
                     tasks.delete_task(tid); removed += 1
                     continue
-                if tasks.update_task(tid, title=n["Task"], notes=n["Note"],
-                                     work_date=n["Work date"] if pd.notna(n["Work date"]) else None,
-                                     alert_date=n["Alert date"] if pd.notna(n["Alert date"]) else None,
-                                     alert_time=n["Alert time"], repeat=n["Repeat"],
-                                     repeat_days=int(n["Every N days"]) if pd.notna(n["Every N days"]) else None):
-                    changed += 1
+                rep_k, det = back.get(n["Repeat"], "none"), str(n["Repeat details"] or "").strip()
+                try:
+                    kw = {}
+                    if rep_k == "custom":
+                        if not det.isdigit() or int(det) < 1:
+                            raise ValueError("Repeat details: type how many days, like 4.")
+                        kw["repeat_days"] = int(det)
+                    elif rep_k in tasks.PICK:
+                        kw["repeat_rule"] = det
+                    if tasks.update_task(tid, title=n["Task"], notes=n["Note"],
+                                         work_date=n["Work date"] if pd.notna(n["Work date"]) else None,
+                                         alert_date=n["Alert date"] if pd.notna(n["Alert date"]) else None,
+                                         alert_time=n["Alert time"], repeat=rep_k, **kw):
+                        changed += 1
+                except ValueError as e:
+                    errs.append(f"{n['Task']}: {e}")
+                    continue
                 if n["Done"]:
                     tasks.mark_done(tid); done += 1
+            if errs:
+                st.session_state["task_err"] = "Not saved: " + " | ".join(errs)
             set_flash("flash_tasks", "ok", f"Saved. Done: {done}, changed: {changed}, removed: {removed}.")
             st.rerun()
         st.caption("Tick **Done** and press **Save changes**. You can also change any date, time, repeat or note in the table. "

@@ -214,6 +214,41 @@ def campaign_names(did_rows):
     return out
 
 
+def active_links():
+    """(publisher ids that own at least one ACTIVE DID, {(publisher id, campaign name or Ringba campaign id, lower case)} of active DIDs)."""
+    def load():
+        rows = db.q("SELECT id, publisher_id, campaign_id FROM dids WHERE status='active' AND publisher_id IS NOT NULL")
+        names = campaign_names(rows) if rows else {}
+        pubs, pairs = set(), set()
+        for r in rows:
+            pubs.add(r["publisher_id"])
+            keys = [k for k in (names.get(r["id"]), r["campaign_id"]) if k]
+            for k in keys:
+                pairs.add((r["publisher_id"], str(k).strip().lower()))
+            if not keys:
+                pairs.add((r["publisher_id"], "*"))      # campaign of this DID is unknown: do not hide the publisher's caps because of it
+        return pubs, pairs
+    return db.memo(("active_dids_links",), load)
+
+
+def cap_has_active_did(cap, links=None):
+    """A publisher cap only counts while that publisher has an ACTIVE DID in that campaign (any campaign if the cap has none).
+    Buyer caps are not affected."""
+    if cap["entity_type"] != "publisher":
+        return True
+    pubs, pairs = links or active_links()
+    pid = cap["entity_id"]
+    if pid not in pubs:
+        return False
+    camp = (cap.get("campaign_name") or "").strip().lower()
+    if not camp:
+        return True
+    keys = {camp}
+    if cap.get("ringba_key"):
+        keys.add(str(cap["ringba_key"]).split(":")[0].strip().lower())         # Ringba rows also know the campaign id
+    return any((pid, k) in pairs for k in keys) or (pid, "*") in pairs
+
+
 def calls_last_30d(now=None):
     since = (now or db.now_utc()) - timedelta(days=30)
     return {r["did_id"]: r["n"] for r in db.q("SELECT did_id, COUNT(*) AS n FROM calls WHERE did_id IS NOT NULL AND call_at >= :s "
