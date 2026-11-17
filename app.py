@@ -1846,13 +1846,99 @@ def page_tasks():
             st.success(f"{a} task(s) alerted, {f} follow-up(s). " + (f"E-mail: {res}" if res else "Nothing is due right now."))
 
 
+def page_cap_overview():
+    import capview
+    import targets as tg
+    now = db.now_utc()
+    st.caption("One place to see **every cap**: the TOTAL cap of each publisher (only publishers with an active DID) and the GLOBAL daily / monthly cap of "
+               "each active buyer target, with how much is used. Caps are set on the Caps tab (publisher caps and target caps are read from Ringba automatically).")
+    pub_tab, tgt_tab = st.tabs(["🧑‍💼 Publishers (active DID)", "🎯 Buyer targets (active)"])
+    prog = lambda label: st.column_config.ProgressColumn(label, min_value=0, max_value=100, format="%.0f%%")
+    with pub_tab:
+        rows, detail = capview.publisher_caps(now)
+        with_cap = [r for r in rows if r["has_cap"]]
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Publishers with an active DID", len(rows))
+        k2.metric("...of them with a cap", len(with_cap))
+        k3.metric("Without any cap", len(rows) - len(with_cap))
+        if not rows:
+            st.info("No publisher has an active DID yet. Press 'Read DIDs from Ringba' on the Sync & Import tab.")
+        else:
+            st.markdown("**Total cap per publisher** (sum of its campaign caps)")
+            inc = st.checkbox("Also show publishers without a cap", key="ov_pub_nocap")
+            df = pd.DataFrame([{k: v for k, v in r.items() if k != "has_cap"} for r in (rows if inc else with_cap)])
+            if df.empty:
+                st.info("No publisher cap yet. On the Caps tab press 'Read publisher caps from Ringba now'.")
+            else:
+                show_df("ov_pub", df, column_config={
+                    "publisher": "Publisher", "active_dids": st.column_config.NumberColumn("Active DIDs"),
+                    "campaigns_with_cap": st.column_config.NumberColumn("Campaigns with a cap"),
+                    "daily_cap_total": st.column_config.NumberColumn("Daily cap (total)"), "used_today": st.column_config.NumberColumn("Used today"),
+                    "today_pct": prog("Today %"), "monthly_cap_total": st.column_config.NumberColumn("Monthly cap (total)"),
+                    "used_month": st.column_config.NumberColumn("Used this month"), "month_pct": prog("Month %"),
+                    "all_campaigns_daily_cap": st.column_config.NumberColumn("Daily cap, all campaigns", help="A cap on the publisher as a whole (not added to the total)"),
+                    "all_campaigns_daily_used": st.column_config.NumberColumn("Used today (all)"),
+                    "all_campaigns_monthly_cap": st.column_config.NumberColumn("Monthly cap, all campaigns"),
+                    "all_campaigns_monthly_used": st.column_config.NumberColumn("Used this month (all)")})
+            with st.expander(f"Every publisher cap by campaign ({len(detail)})", expanded=False):
+                if detail:
+                    show_df("ov_pub_detail", pd.DataFrame(detail).drop(columns=["pid"]), column_config={
+                        "publisher": "Publisher", "campaign": "Campaign", "period": "Period", "counts": "Counts", "cap": st.column_config.NumberColumn("Cap"),
+                        "used": st.column_config.NumberColumn("Used"), "pct": prog("Used %"), "source": "Cap from"})
+                else:
+                    st.caption("No caps.")
+    with tgt_tab:
+        trows = capview.target_caps()
+        ok_t, err = db.get_setting("targets_last_ok", ""), db.get_setting("targets_last_error", "")
+        c1, c2 = st.columns([1, 3])
+        if c1.button("🔄 Read targets from Ringba now", key="ov_tg_sync"):
+            try:
+                rc.set_deadline(120)
+                r = tg.run(force=True)
+                d = r["definitions"]
+                set_flash("flash_ov", "ok", f"Ringba has {d['in_ringba']} targets: {d['report']['with_daily_cap']} with a daily cap, {d['report']['with_monthly_cap']} with a monthly cap.")
+            except Exception as e:
+                set_flash("flash_ov", "err", f"Could not read targets: {e}")
+            finally:
+                rc.set_deadline(None)
+            st.rerun()
+        c2.caption((f"Last successful read: {ago(ok_t)}. " if ok_t else "Not read yet. ") + (f"Last problem: {err}" if err else ""))
+        flash("flash_ov")
+        with_cap = [r for r in trows if r["has_cap"]]
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Active targets", len(trows))
+        k2.metric("...with a daily or monthly cap", len(with_cap))
+        k3.metric("Without a cap", len(trows) - len(with_cap))
+        if not trows:
+            st.info("No target is saved yet. Press the button above to read the targets from Ringba.")
+        else:
+            st.markdown("**Global cap of each active target** (the cap on the whole target, whoever sends the calls)")
+            inc = st.checkbox("Also show targets without a cap", key="ov_tg_nocap")
+            df = pd.DataFrame([{k: v for k, v in r.items() if k not in ("has_cap",)} for r in (trows if inc else with_cap)])
+            if df.empty:
+                st.info("None of the active targets has a daily or monthly cap in Ringba.")
+            else:
+                df["usage_read"] = df["usage_read"].map(lambda v: ago(v) if v else "never")
+                show_df("ov_tg", df.sort_values(["today_pct", "month_pct"], ascending=False, na_position="last"), column_config={
+                    "buyer": "Buyer", "target": "Target", "daily_cap": st.column_config.NumberColumn("Daily cap"),
+                    "used_today": st.column_config.NumberColumn("Used today"), "today_pct": prog("Today %"),
+                    "monthly_cap": st.column_config.NumberColumn("Monthly cap"), "used_month": st.column_config.NumberColumn("Used this month"),
+                    "month_pct": prog("Month %"), "alerts_on": st.column_config.CheckboxColumn("Alerts on"), "usage_read": "Usage read"})
+            bt = capview.buyer_totals(trows)
+            with st.expander("Total per buyer (sum of its target caps)"):
+                show_df("ov_buyers", pd.DataFrame(bt), column_config={
+                    "buyer": "Buyer", "active_targets": "Active targets", "targets_with_cap": "Targets with a cap",
+                    "daily_cap_total": "Daily cap (total)", "used_today": "Used today", "today_pct": prog("Today %"),
+                    "monthly_cap_total": "Monthly cap (total)", "used_month": "Used this month", "month_pct": prog("Month %")})
+
+
 def tasks_tz_now():
     """Current time in the tasks time zone (Dhaka by default), AM/PM, for the 'Page loaded' line."""
     import tasks
     return tasks.local_now().strftime("%a %d %b %Y, %I:%M:%S %p") + f" ({db.get_setting('tasks_timezone', 'Asia/Dhaka')})"
 
 
-PAGES = {"📊 Dashboard": page_dashboard, "📑 Reports": page_reports, "🧑‍💼 Publishers": page_publishers,
+PAGES = {"📊 Dashboard": page_dashboard, "🎛️ Cap overview": page_cap_overview, "📑 Reports": page_reports, "🧑‍💼 Publishers": page_publishers,
          "🏢 Buyers": page_buyers, "📞 DIDs": page_dids, "🚦 Caps": page_caps, "✅ My Tasks": page_tasks, "✉️ Emails": page_emails,
          "📝 Email templates": page_templates, "📜 Alert Log": page_log, "🔄 Sync & Import": page_sync,
          "⚙️ Settings": page_settings}

@@ -472,3 +472,25 @@ When you tick Done the task moves to the next chosen day and the alert comes aga
 - **Publisher caps** (Ringba or typed) only count and alert while that publisher has an **active DID** in that campaign. No active DID there (none at all, only retired ones, or a DID in another campaign) = the cap is not shown on the Dashboard, not counted and never alerts. Buyer caps are not affected. On the Caps tab, tick "Also show caps ... without an active DID" to see the hidden ones. When a DID is added or becomes active again, its caps come back by themselves.
 - If a DID's campaign is not known at all, it counts for every campaign of its publisher (so a real alert is never hidden because of missing data).
 - The **Publishers** tab shows only publishers with at least one active DID (new column "Active DIDs"). To add a publisher by hand, tick "Also show publishers that have no active DID".
+
+---
+
+## 🎛️ Cap overview (new page)
+
+Open **🎛️ Cap overview** in the left menu (right under Dashboard). Two tabs:
+
+**🧑‍💼 Publishers (active DID)**
+- Only publishers that have an active DID are shown.
+- Each row shows the **total** of that publisher's campaign caps (daily and monthly), how much is used, and the %.
+- A cap set on "all campaigns" is shown in its own columns, so nothing is counted twice.
+- Open "Every publisher cap by campaign" to see each campaign cap.
+- Tick "Also show publishers without a cap" to see who has no cap.
+- If it is empty: Caps tab → "Read publisher caps from Ringba now".
+
+**🎯 Buyer targets (active)**
+- Shows the **global daily and monthly cap** of every active target, with used today / this month and the %.
+- Press **🔄 Read targets from Ringba now** first (the page shows when it was last read).
+- Open "Total per buyer" to see the sum of the target caps per buyer.
+- Tick "Also show targets without a cap" to see the rest.
+
+All tables have the filter bar, and the Refresh button works on this page too.
