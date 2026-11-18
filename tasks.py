@@ -189,7 +189,7 @@ def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", al
     rd = max(int(repeat_days), 1) if (repeat == "custom" and repeat_days) else (1 if repeat == "custom" else None)
     rows = db.q("INSERT INTO tasks (title, notes, work_date, alert_date, alert_time, repeat, repeat_days, repeat_rule, status, alert_count, created_at, updated_at) "
                 "VALUES (:t,:n,:w,:a,:at,:r,:rd,:rr,'open',0,:now,:now) RETURNING id",
-                t=title, n=(notes or "").strip(), w=iso(wd), a=iso(ad), at=at, r=repeat, rd=rd, rr=rule, now=db.now_utc())
+                t=title, n=clean_note(notes), w=iso(wd), a=iso(ad), at=at, r=repeat, rd=rd, rr=rule, now=db.now_utc())
     tid = rows[0]["id"]
     log(tid, title, "created", f"work {iso(wd)}, alert {iso(ad)} {fmt_time(at)}, {repeat_label(repeat, rd, rule)}")
     return tid
@@ -232,6 +232,8 @@ def update_task(task_id, **new):
         elif f == "repeat_rule":
             eff = new.get("repeat") or old["repeat"]
             v = parse_rule(eff, v) if eff in PICK else None
+        elif f == "notes":
+            v = clean_note(v)
         else:
             v = (v or "").strip()
             if f == "title" and not v:
@@ -362,8 +364,9 @@ def _line(t, td):
         s += f" (was due {wd:%a %d %b})"
     elif wd and wd > td:
         s += f" (work on {wd:%a %d %b})"
-    if (t["notes"] or "").strip():
-        s += "\n  Note: " + " ".join(t["notes"].split())[:300]
+    nt = note_text(t)
+    if nt:
+        s += "\n  Details: " + " / ".join(x.strip() for x in nt.split("\n") if x.strip())[:300]
     return s
 
 
@@ -498,14 +501,171 @@ def next_alert_text(t, now=None):
     return f"follow-up #{n} at {due.strftime('%I:%M %p')}"
 
 
-def _note_lines(t):
-    """The note as separate lines (a '-', '*' or bullet in front is ignored)."""
-    out = []
-    for ln in str(t.get("notes") or "").replace("\r", "").split("\n"):
+# ---------- rich notes (written in the editor on the My Tasks page: bold, italic, bullets, tick boxes, colours) ----------
+import re as _re
+from html import escape as _hesc
+from html.parser import HTMLParser as _HP
+
+_OK_TAGS = {"b", "strong", "i", "em", "u", "s", "strike", "ul", "ol", "li", "br", "p", "div", "span", "font"}
+_VOID = {"br"}
+_COLOR = _re.compile(r"^(#[0-9a-fA-F]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)|[a-zA-Z]{3,20})$")
+MAX_NOTE = 20000
+
+
+def is_html(text):
+    return bool(_re.match(r"\s*<", str(text or "")))
+
+
+def _safe_style(style):
+    keep = []
+    for part in str(style or "").split(";"):
+        if ":" not in part:
+            continue
+        k, v = (x.strip() for x in part.split(":", 1))
+        k = k.lower()
+        if k in ("color", "background-color", "background") and _COLOR.match(v):
+            keep.append(f"{'background-color' if k == 'background' else k}:{v}")
+        elif k == "font-weight" and v in ("bold", "700", "600", "800"):
+            keep.append("font-weight:bold")
+        elif k == "font-style" and v == "italic":
+            keep.append("font-style:italic")
+        elif k == "text-decoration" and v in ("underline", "line-through"):
+            keep.append(f"text-decoration:{v}")
+    return ";".join(keep)
+
+
+class _Clean(_HP):
+    """Keeps only simple formatting tags, and only colour / bold / italic style. Scripts, links, images and events are dropped."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out, self.stack, self.skip = [], [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self.skip += 1
+            return
+        if tag not in _OK_TAGS or self.skip:
+            return
+        a = dict(attrs)
+        extra = ""
+        st = _safe_style(a.get("style"))
+        if st:
+            extra += f' style="{_hesc(st, quote=True)}"'
+        if tag == "font" and a.get("color") and _COLOR.match(a["color"].strip()):
+            extra += f' color="{_hesc(a["color"].strip(), quote=True)}"'
+        self.out.append(f"<{tag}{extra}>")
+        if tag not in _VOID:
+            self.stack.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        if tag == "br" and not self.skip:
+            self.out.append("<br>")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self.skip = max(0, self.skip - 1)
+            return
+        if tag in self.stack and not self.skip:
+            while self.stack:
+                t = self.stack.pop()
+                self.out.append(f"</{t}>")
+                if t == tag:
+                    break
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(_hesc(data, quote=False))
+
+    def result(self):
+        while self.stack:
+            self.out.append(f"</{self.stack.pop()}>")
+        return "".join(self.out)
+
+
+def clean_html(text):
+    p = _Clean()
+    p.feed(str(text or "")[:MAX_NOTE * 3])
+    p.close()
+    return p.result()[:MAX_NOTE]
+
+
+class _Text(_HP):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.lists = [], []
+
+    def _nl(self):
+        if self.parts and not self.parts[-1].endswith("\n"):
+            self.parts.append("\n")
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("ul", "ol"):
+            self.lists.append([tag, 0])
+            self._nl()
+        elif tag == "li":
+            self._nl()
+            if self.lists and self.lists[-1][0] == "ol":
+                self.lists[-1][1] += 1
+                self.parts.append(f"{self.lists[-1][1]}. ")
+            else:
+                self.parts.append("\u2022 ")
+        elif tag == "br":
+            self.parts.append("\n")
+        elif tag in ("p", "div"):
+            self._nl()
+
+    def handle_endtag(self, tag):
+        if tag in ("ul", "ol") and self.lists:
+            self.lists.pop()
+            self._nl()
+        elif tag in ("p", "div", "li"):
+            self._nl()
+
+    def handle_data(self, data):
+        self.parts.append(data.replace("\xa0", " "))
+
+
+def note_text(t):
+    """The note as plain lines (works for old plain notes and new rich notes)."""
+    raw = (t.get("notes") if isinstance(t, dict) else t) or ""
+    raw = str(raw)
+    if not is_html(raw):
+        return "\n".join(x.rstrip() for x in raw.replace("\r", "").split("\n")).strip()
+    p = _Text()
+    p.feed(raw)
+    p.close()
+    lines = [x.rstrip() for x in "".join(p.parts).split("\n")]
+    return "\n".join(x for x in lines if x.strip()).strip()
+
+
+def note_html(t):
+    """The note as safe HTML for the e-mail (old plain notes: one line = one bullet)."""
+    raw = ((t.get("notes") if isinstance(t, dict) else t) or "").strip()
+    if not raw:
+        return ""
+    if is_html(raw):
+        return clean_html(raw)
+    items = []
+    for ln in raw.replace("\r", "").split("\n"):
         ln = ln.strip().lstrip("-*\u2022\u25cf").strip()
         if ln:
-            out.append(ln[:300])
-    return out[:12]
+            items.append(f"<li>{_hesc(ln[:300])}</li>")
+    return "<ul>" + "".join(items) + "</ul>" if items else ""
+
+
+def clean_note(text):
+    """What gets stored: safe HTML, or empty when there is no text."""
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    if not is_html(text):
+        return text
+    h = clean_html(text)
+    return h if note_text(h).strip() else ""
+
+
+def _note_lines(t):
+    return [x[:300] for x in note_text(t).split("\n") if x.strip()][:30]
 
 
 def _task_lines(items, now, followup):
@@ -522,8 +682,8 @@ def _task_lines(items, now, followup):
             lines.append(f"   \u2022 Already alerted {t['alert_count']}x")
         nl = _note_lines(t)
         if nl:
-            lines.append("   \u2022 Note:")
-            lines += [f"       - {x}" for x in nl]
+            lines.append("   \u2022 Details:")
+            lines += [f"       {x}" for x in nl]
         out.append("\n".join(lines))
     return "\n\n".join(out)
 
@@ -549,11 +709,11 @@ def _card_html(n, t, followup, accent="#1a73e8", tag=""):
         chips += _chip("\U0001F501 Already alerted", f"{t['alert_count']}x", "#fce8e6", "#a50e0e")
     if tag:
         chips = _chip("", tag, accent, "#ffffff") + chips
-    nl = _note_lines(t)
+    nh = note_html(t)
     notes = ""
-    if nl:
-        notes = ('<div style="margin-top:8px;font-size:12px;color:#5f6368;font-weight:bold;text-transform:uppercase;letter-spacing:.4px">Note</div>'
-                 '<ul style="margin:4px 0 0 18px;padding:0;font-size:14px;color:#202124">' + "".join(f'<li style="margin:2px 0">{_esc(x)}</li>' for x in nl) + "</ul>")
+    if nh:
+        notes = ('<div style="margin-top:10px;font-size:11px;color:#5f6368;font-weight:bold;text-transform:uppercase;letter-spacing:.5px">Details</div>'
+                 f'<div style="margin-top:4px;font-size:14px;line-height:1.5;color:#202124">{nh}</div>')
     return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 12px 0;border-collapse:collapse">'
             f'<tr><td style="border-left:5px solid {accent};background:#f8f9fa;padding:10px 14px;border-radius:0 6px 6px 0">'
             f'<div style="font-size:16px;font-weight:bold;color:#202124">{n}. {_esc(t["title"])}</div>'
@@ -565,11 +725,42 @@ def _task_cards_html(items, followup):
     return "".join(_card_html(i, t, followup, accent) for i, t in enumerate(items, 1))
 
 
+def subject_text(items):
+    """The e-mail subject comes from the task subject (one task) or the first subject + how many more."""
+    first = str(items[0]["title"]).strip()
+    return first if len(items) == 1 else f"{first} (+{len(items) - 1} more)"
+
+
+def preview_email(drafts, followup=False, now=None):
+    """What the alert e-mail will look like for these task drafts (dicts like task rows). Uses the template chosen in Templates.
+    Returns (subject, html_body, plain_body)."""
+    import templates
+    now = now or db.now_utc()
+    items = []
+    for d in drafts:
+        wd = pdate(d.get("work_date")) or today(now)
+        ad = pdate(d.get("alert_date")) or wd
+        items.append({"id": 0, "title": (d.get("title") or "").strip() or "(task subject)", "notes": clean_note(d.get("notes")),
+                      "work_date": iso(wd), "alert_date": iso(ad), "alert_time": parse_time(d.get("alert_time")) or default_time(),
+                      "alert_count": 1 if followup else 0, "repeat": d.get("repeat") or "none"})
+    app_url = (db.get_setting("app_url", "") or "").strip()
+    fm, fmax = followup_minutes(), followup_max()
+    note = (f"If you do not tick Done in the app, a follow-up comes every {fm} minutes" + (f" (up to {fmax} times)." if fmax else ".")) if fm else ""
+    heading = "Follow-up: still not done" if followup else "Task alert"
+    ctx = {"heading": heading, "count": str(len(items)), "first_title": items[0]["title"], "subject_text": subject_text(items),
+           "now": local_now(now).strftime("%a %d %b %Y, %I:%M %p") + f" ({db.get_setting('tasks_timezone', 'Asia/Dhaka')})",
+           "task_list": _task_lines(items, now, followup), "task_list_html": _task_cards_html(items, followup),
+           "app_url": app_url or "(set the app address in Settings)", "followup_note": note}
+    subj_t, body_t = templates.get_template("task_alert", db.q1("SELECT * FROM alert_rules WHERE alert_type='task_alert'"))
+    plain, html = templates.render_body(body_t, ctx)
+    return (db.get_setting("subject_prefix", "") + " " + templates.render(subj_t, ctx)).strip(), html, plain
+
+
 def _send_group(items, now, heading, followup, key):
     app_url = (db.get_setting("app_url", "") or "").strip()
     fm, fmax = followup_minutes(), followup_max()
     note = (f"If you do not tick Done in the app, a follow-up comes every {fm} minutes" + (f" (up to {fmax} times)." if fmax else ".")) if fm else ""
-    ctx = {"heading": heading, "count": str(len(items)), "first_title": items[0]["title"],
+    ctx = {"heading": heading, "count": str(len(items)), "first_title": items[0]["title"], "subject_text": subject_text(items),
            "now": local_now(now).strftime("%a %d %b %Y, %I:%M %p") + f" ({db.get_setting('tasks_timezone', 'Asia/Dhaka')})",
            "task_list": _task_lines(items, now, followup), "task_list_html": _task_cards_html(items, followup), "app_url": app_url or "(set the app address in Settings)",
            "followup_note": note}

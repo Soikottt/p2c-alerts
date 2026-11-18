@@ -18,7 +18,7 @@ TARGET_PH = [("target", "Target name"), ("buyer", "Buyer name"), ("period", "dai
 
 PLACEHOLDERS = {
     "task_alert": [("heading", "'Task alert' or 'Follow-up: still not done'"), ("count", "How many tasks are in this e-mail"),
-                   ("first_title", "Title of the first task"), ("now", "Date and time now (your time zone, AM/PM)"),
+                   ("first_title", "Subject of the first task"), ("subject_text", "The task subject (or first subject + how many more)"), ("now", "Date and time now (your time zone, AM/PM)"),
                    ("task_list", "The tasks, with work date, alert time and note"), ("app_url", "Address of this app"),
                    ("followup_note", "When the next follow-up comes if the task is not done")],
     "task_digest": [("date", "Today's date"), ("count", "How many tasks are in the list"),
@@ -67,7 +67,7 @@ DEFAULTS = {
                          "Publisher **{publisher}** just sent a call after **{gap_days} days** of silence (previous call: {last_call_time}).\n\n" + _CALL_BODY),
     "watchlist_buyer": ("Watchlist buyer {buyer} connected a call",
                         "A call **CONNECTED** to watchlist buyer **{buyer}**.\n\n" + _CALL_BODY),
-    "task_alert": ("{heading}: {count} task(s) - {first_title}",
+    "task_alert": ("{heading}: {subject_text}",
                    "**{heading}** - {now}\n\n{task_list}\n\nOpen the app, go to **My Tasks** and tick **Done**: {app_url}\n\n{followup_note}"),
     "task_digest": ("My tasks for {date} - {count} to do",
                     "Hello! Your task list for **{date}**.\n\n{task_list}\n\nMark tasks as done in the app (My Tasks tab)."),
@@ -135,9 +135,9 @@ SAMPLE["did_inactive"] = {"did": "+16143505503", "label": "Rehab line", "label_p
                           "idle_days": "34", "last_call": "2026-10-06 04:41 PM EDT", "added": "2026-06-12 09:30 AM EDT",
                           "next_charge": "2026-11-28", "monthly_cost": "$2.50",
                           "next_step": "If nobody answers this email: a reminder is sent in 3 day(s) (reminder 1 of 3). If you click a 'wait' button, this DID is paused for those days and you get a follow-up email when the pause ends. The alert is never paused for ever."}
-SAMPLE["task_alert"] = {"heading": "Follow-up: still not done", "count": "2", "first_title": "Check weekend caps",
+SAMPLE["task_alert"] = {"heading": "Follow-up: still not done", "count": "2", "first_title": "Check weekend caps", "subject_text": "Check weekend caps (+1 more)",
                         "now": "Mon 16 Nov 2026, 09:30 AM (Asia/Dhaka)",
-                        "task_list": "1) CHECK WEEKEND CAPS\n   \u2022 Work date: Mon 16 Nov 2026\n   \u2022 Alert: Mon 16 Nov 2026, 09:00 AM\n   \u2022 Already alerted 1x\n   \u2022 Note:\n       - ask Mia about Rehab\n       - check Rehab FL cap\n\n2) SEND INVOICES\n   \u2022 Work date: Fri 13 Nov 2026\n   \u2022 Alert: Fri 13 Nov 2026, 09:00 AM\n   \u2022 Already alerted 3x",
+                        "task_list": "1) CHECK WEEKEND CAPS\n   \u2022 Work date: Mon 16 Nov 2026\n   \u2022 Alert: Mon 16 Nov 2026, 09:00 AM\n   \u2022 Already alerted 1x\n   \u2022 Details:\n       \u2022 ask Mia about Rehab\n       \u2022 check Rehab FL cap\n\n2) SEND INVOICES\n   \u2022 Work date: Fri 13 Nov 2026\n   \u2022 Alert: Fri 13 Nov 2026, 09:00 AM\n   \u2022 Already alerted 3x",
                         "app_url": "https://your-app.streamlit.app",
                         "followup_note": "If you do not tick Done in the app, a follow-up comes every 30 minutes (up to 10 times)."}
 SAMPLE["task_digest"] = {"date": "Mon 16 Nov", "count": "3",

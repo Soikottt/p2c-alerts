@@ -213,6 +213,9 @@ def _seed_templates_and_actions():
         if row and row["body"] in olds:
             subj, body = templates.DEFAULTS[atype]
             db.x("UPDATE email_templates SET subject=:s, body=:b, updated_at=:n WHERE id=:i", s=subj, b=body, n=now, i=row["id"])
+    row = db.q1("SELECT id, subject FROM email_templates WHERE alert_type='task_alert' AND name='Default'")
+    if row and row["subject"] == "{heading}: {count} task(s) - {first_title}":      # subject now comes from the task subject
+        db.x("UPDATE email_templates SET subject=:s, updated_at=:n WHERE id=:i", s=templates.DEFAULTS["task_alert"][0], n=now, i=row["id"])
     for i, (atype, label, effect, days) in enumerate(ACTION_SEEDS):
         if atype in seeded:
             continue

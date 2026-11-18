@@ -518,3 +518,11 @@ Each task is a card: bold title, Work date and Alert time as coloured labels, an
 
 **5. Save buttons**
 The My Tasks page no longer reloads on every change: the add form and the task table only act when you press their button. (The other pages already worked this way.) The filter and view pickers still refresh the page, because they only change what you see.
+
+### My Tasks v3: task subject, Gmail-like details box, e-mail preview (Update 16)
+
+* **New task:** type the **Task subject** (it becomes the e-mail subject), then write the **Details** in the box. The box has the same buttons as Gmail: bold, italic, underline, strikethrough, bullets, numbers, a tick box ☐ (click a ☐ in the text to turn it into ☑), text colour and highlight colour. You do not type `**` or `-`.
+* Press **👁 Preview e-mail** to see the subject and the e-mail as it will be sent (it uses the template chosen on the Templates page). Press **➕ Add task** when it looks right.
+* **Edit a task** (under the To do table): pick a task, change its subject and details, preview, **Save this task**.
+* The **To do** table shows **Created (Dhaka)**, the date and time the task was made.
+* The details box is a small custom component stored in the folder `rich_note/`. Upload that folder to GitHub together with `richnote.py` and `app.py`. If the box cannot load, the app shows a plain text box instead.

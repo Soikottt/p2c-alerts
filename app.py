@@ -1732,6 +1732,7 @@ def page_settings():
 # ================================================================== navigation: only the chosen page is loaded (fast)
 def page_tasks():
     import tasks
+    import richnote
     flash("flash_tasks")
     now = db.now_utc()
     td = tasks.today(now)
@@ -1742,12 +1743,21 @@ def page_tasks():
                "The engine checks every 5 minutes, so an e-mail can be up to 5 minutes late.")
     opts = tasks.time_options()
     dflt = tasks.fmt_time(tasks.default_time())
-    def add_task_cb():
+    ver = st.session_state.get("task_ver", 0)
+    note_key = f"task_note_{ver}"
+
+    def draft_from_state():
         ss = st.session_state
         rep = ss.get("task_rep", "none")
         rule = {"pick_weekdays": ss.get("task_wdays"), "pick_monthdays": ss.get("task_mdays"), "pick_dates": ss.get("task_dates")}.get(rep)
+        return rep, rule, {"title": ss.get("task_title"), "notes": ss.get(note_key) or "", "work_date": ss.get("task_wd"),
+                           "alert_date": ss.get("task_ad"), "alert_time": ss.get("task_at"), "repeat": rep}
+
+    def add_task_cb():
+        ss = st.session_state
+        rep, rule, d = draft_from_state()
         try:
-            tid = tasks.add_task(ss.get("task_title"), ss.get("task_notes"), ss.get("task_wd"), ss.get("task_ad"), rep, ss.get("task_at"),
+            tid = tasks.add_task(d["title"], d["notes"], d["work_date"], d["alert_date"], rep, d["alert_time"],
                                  ss.get("task_rdays") if rep == "custom" else None, rule)
             row = db.q1("SELECT * FROM tasks WHERE id=:i", i=tid)
             late = tasks.alert_dt(row) <= db.now_utc()
@@ -1756,33 +1766,55 @@ def page_tasks():
                       if late else f"First e-mail: {first:%a %d %b %Y} at {ss.get('task_at')}.") +
                       (f" It repeats: {tasks.repeat_label(rep, ss.get('task_rdays'), row['repeat_rule'])}." if rep != "none" else ""))
             ss["task_title"] = ""
-            ss["task_notes"] = ""
+            ss["task_ver"] = ss.get("task_ver", 0) + 1          # a fresh, empty details box
+            ss.pop("task_preview", None)
         except ValueError as e:
             ss["task_err"] = str(e)
+
+    def preview_cb():
+        ss = st.session_state
+        ss["task_preview"] = draft_from_state()[2]
 
     err_msg = st.session_state.pop("task_err", None)
     if err_msg:
         st.error(err_msg)
+    st.subheader("➕ New task")
     with st.form("task_add_form", border=True):
-        st.text_input("Task (what to do)", key="task_title")
+        st.text_input("Task subject (this becomes the e-mail subject)", key="task_title", placeholder="For example: Call Rehab buyer about the cap")
+        st.markdown("**Details: what to do** (optional)")
+        richnote.rich_note("", key=note_key, height=240)
         c1, c2, c3 = st.columns(3)
         c1.date_input("Work date (do it on)", td, key="task_wd")
         c2.date_input("Alert date (e-mail me on)", td, key="task_ad", help="Can be earlier than the work date.")
         c3.selectbox("Alert time (AM/PM)", opts, index=opts.index(dflt) if dflt in opts else 36, key="task_at")
         st.selectbox("Repeat", tasks.REPEATS, format_func=lambda r: tasks.REPEAT_LABEL[r], key="task_rep",
                      help="When you tick Done, a repeating task moves to its next date and the alert comes again.")
-        st.caption("Repeat options: only the one that matches your **Repeat** choice above is used. Nothing changes on the page until you press **Add task**.")
-        r1, r2 = st.columns(2)
-        r1.number_input("Every N days: how many days?", 1, 365, 7, key="task_rdays")
-        r2.multiselect("Chosen weekdays: which days?", tasks.WD_NAMES, default=["Mon"], key="task_wdays",
-                       help="Pick one or more. Example: Mon and Tue = every Monday and every Tuesday.")
-        r3, r4 = st.columns(2)
-        r3.multiselect("Chosen month days: which days?", tasks.MONTH_DAY_CHOICES, default=["15"], key="task_mdays",
-                       help="Pick one or more, for example 15 and 20. 'last' = the last day of the month. A short month uses its last day (31 in February = 28).")
-        r4.text_input("Chosen dates (YYYY-MM-DD, separated by commas)", key="task_dates", placeholder="2026-12-01, 2026-12-15, 2027-01-10",
-                      help="Any dates you like. After the last one the task is finished.")
-        st.text_area("Note (optional): one point per line becomes a bullet in the e-mail", key="task_notes", height=70)
-        st.form_submit_button("➕ Add task", type="primary", on_click=add_task_cb)
+        with st.expander("Repeat options (only if you chose a repeat above)"):
+            st.caption("Only the option that matches your **Repeat** choice is used.")
+            r1, r2 = st.columns(2)
+            r1.number_input("Every N days: how many days?", 1, 365, 7, key="task_rdays")
+            r2.multiselect("Chosen weekdays: which days?", tasks.WD_NAMES, default=["Mon"], key="task_wdays",
+                           help="Pick one or more. Example: Mon and Tue = every Monday and every Tuesday.")
+            r3, r4 = st.columns(2)
+            r3.multiselect("Chosen month days: which days?", tasks.MONTH_DAY_CHOICES, default=["15"], key="task_mdays",
+                           help="Pick one or more, for example 15 and 20. 'last' = the last day of the month. A short month uses its last day.")
+            r4.text_input("Chosen dates (YYYY-MM-DD, separated by commas)", key="task_dates", placeholder="2026-12-01, 2026-12-15",
+                          help="Any dates you like. After the last one the task is finished.")
+        b1, b2 = st.columns(2)
+        b1.form_submit_button("👁 Preview e-mail", on_click=preview_cb)
+        b2.form_submit_button("➕ Add task", type="primary", on_click=add_task_cb)
+    pv = st.session_state.get("task_preview")
+    if pv:
+        subj, html_p, plain_p = tasks.preview_email([pv])
+        with st.container(border=True):
+            st.markdown("**👁 This is how your alert e-mail will look**")
+            st.markdown(f"**Subject:** {subj}")
+            st.markdown(html_p, unsafe_allow_html=True)
+            with st.expander("Plain-text version"):
+                st.text(plain_p)
+            if st.button("Close preview", key="task_pv_close"):
+                st.session_state.pop("task_preview", None)
+                st.rerun()
 
     rows = tasks.open_tasks()
     state = {r["id"]: tasks.state_of(r, now) for r in rows}
@@ -1804,16 +1836,18 @@ def page_tasks():
     if not shown:
         st.info("Nothing here." if rows else "Nothing open. Add your first task above.")
     else:
-        df = pd.DataFrame([{"id": r["id"], "Done": False, "Status": tasks.STATE_LABEL[state[r["id"]]], "Task": r["title"],
+        df = pd.DataFrame([{"id": r["id"], "Done": False, "Status": tasks.STATE_LABEL[state[r["id"]]], "Task": r["title"], "Created": tasks.fmt_dt(r["created_at"]),
                             "Work date": tasks.pdate(r["work_date"]), "Alert date": tasks.pdate(r["alert_date"]),
                             "Alert time": tasks.fmt_time(r["alert_time"] or tasks.default_time()), "Repeat": tasks.REPEAT_SHORT[r["repeat"]],
                             "Repeat details": (str(r["repeat_days"] or "") if r["repeat"] == "custom" else tasks.rule_text(r["repeat"], r["repeat_rule"])),
                             "Next e-mail": tasks.next_alert_text(r, now),
-                            "Note": r["notes"] or "", "Remove": False} for r in shown])
-        df, sig = filter_bar("tasks", df, skip=("Task", "Note", "Next e-mail", "id", "Repeat details"))
-        order = ["Done", "Status", "Task", "Work date", "Alert date", "Alert time", "Repeat", "Repeat details", "Next e-mail", "Note", "Remove"]
+                            "Details": " / ".join(x.strip() for x in tasks.note_text(r).split("\n") if x.strip())[:160], "Remove": False} for r in shown])
+        df, sig = filter_bar("tasks", df, skip=("Task", "Details", "Next e-mail", "id", "Repeat details", "Created"))
+        order = ["Done", "Status", "Task", "Details", "Created", "Work date", "Alert date", "Alert time", "Repeat", "Repeat details", "Next e-mail", "Remove"]
         cfg = {"id": None, "Done": st.column_config.CheckboxColumn("Done", width="small"),
                "Status": st.column_config.TextColumn("Status", width="medium"),
+               "Task": st.column_config.TextColumn("Task subject"), "Created": st.column_config.TextColumn("Created (Dhaka)"),
+               "Details": st.column_config.TextColumn("Details (edit below)"),
                "Work date": st.column_config.DateColumn("Work date", format="ddd DD MMM YYYY"),
                "Alert date": st.column_config.DateColumn("Alert date", format="ddd DD MMM YYYY"),
                "Alert time": st.column_config.SelectboxColumn("Alert time", options=opts, required=True),
@@ -1826,10 +1860,10 @@ def page_tasks():
         with st.form("task_edit_form", border=False):
             try:
                 ed = st.data_editor(styled, hide_index=True, use_container_width=True, key=f"task_editor_{sig}",
-                                    disabled=["id", "Status", "Next e-mail"], column_order=order, column_config=cfg)
+                                    disabled=["id", "Status", "Next e-mail", "Created", "Details"], column_order=order, column_config=cfg)
             except Exception:
                 ed = st.data_editor(df, hide_index=True, use_container_width=True, key=f"task_editor_{sig}_plain",
-                                    disabled=["id", "Status", "Next e-mail"], column_order=order, column_config=cfg)
+                                    disabled=["id", "Status", "Next e-mail", "Created", "Details"], column_order=order, column_config=cfg)
             save_tasks = st.form_submit_button("💾 Save changes", type="primary")
         if save_tasks:
             done = changed = removed = 0
@@ -1850,7 +1884,7 @@ def page_tasks():
                         kw["repeat_days"] = int(det)
                     elif rep_k in tasks.PICK:
                         kw["repeat_rule"] = det
-                    if tasks.update_task(tid, title=n["Task"], notes=n["Note"],
+                    if tasks.update_task(tid, title=n["Task"],
                                          work_date=n["Work date"] if pd.notna(n["Work date"]) else None,
                                          alert_date=n["Alert date"] if pd.notna(n["Alert date"]) else None,
                                          alert_time=n["Alert time"], repeat=rep_k, **kw):
@@ -1864,8 +1898,46 @@ def page_tasks():
                 st.session_state["task_err"] = "Not saved: " + " | ".join(errs)
             set_flash("flash_tasks", "ok", f"Saved. Done: {done}, changed: {changed}, removed: {removed}.")
             st.rerun()
-        st.caption("Tick **Done** and press **Save changes**. You can also change any date, time, repeat or note in the table. "
-                   "Changing the alert date or time makes the alert start again.")
+        st.caption("Tick **Done** and press **Save changes**. You can also change the subject, dates, time and repeat in the table. "
+                   "Changing the alert date or time makes the alert start again. To change the details text, use **Edit a task** below.")
+
+    with st.expander("✏️ Edit a task (subject and details with bold, bullets, tick boxes, colours)"):
+        if not rows:
+            st.write("No open tasks.")
+        else:
+            pick = st.selectbox("Which task?", [r["id"] for r in rows], format_func=lambda i: next(r["title"] for r in rows if r["id"] == i), key="task_edit_pick")
+            cur = next(r for r in rows if r["id"] == pick)
+            ev = st.session_state.get("task_edit_ver", 0)
+            init = tasks.note_html(cur) if tasks.note_text(cur) else ""
+            nk = f"task_edit_note_{pick}_{ev}"
+
+            def edit_cb():
+                ss = st.session_state
+                try:
+                    tasks.update_task(pick, title=ss.get(f"task_edit_title_{pick}_{ev}"), notes=ss.get(nk) or "")
+                    set_flash("flash_tasks", "ok", "Task saved.")
+                    ss["task_edit_ver"] = ev + 1
+                    ss.pop("task_edit_preview", None)
+                except ValueError as e:
+                    ss["task_err"] = str(e)
+
+            def edit_pv_cb():
+                ss = st.session_state
+                ss["task_edit_preview"] = {"title": ss.get(f"task_edit_title_{pick}_{ev}"), "notes": ss.get(nk) or "", "work_date": cur["work_date"],
+                                           "alert_date": cur["alert_date"], "alert_time": cur["alert_time"], "repeat": cur["repeat"]}
+
+            with st.form(f"task_edit_one_{pick}_{ev}", border=False):
+                st.text_input("Task subject", cur["title"], key=f"task_edit_title_{pick}_{ev}")
+                richnote.rich_note(init, key=nk, height=240)
+                e1, e2 = st.columns(2)
+                e1.form_submit_button("👁 Preview e-mail", on_click=edit_pv_cb)
+                e2.form_submit_button("💾 Save this task", type="primary", on_click=edit_cb)
+            ep = st.session_state.get("task_edit_preview")
+            if ep:
+                subj, html_p, plain_p = tasks.preview_email([ep])
+                with st.container(border=True):
+                    st.markdown(f"**Subject:** {subj}")
+                    st.markdown(html_p, unsafe_allow_html=True)
 
     with st.expander("✅ Done recently (tick Reopen to bring a task back)"):
         dn = db.q("SELECT id, title, done_at FROM tasks WHERE status='done' ORDER BY done_at DESC LIMIT 30")
