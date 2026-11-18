@@ -241,6 +241,20 @@ def row_to_record(row, keymap=None):
     }
 
 
+def build_keymap(rows, sample=500):
+    """Which response key holds each field. Ringba leaves a key OUT of a row when the value is empty (a call that was
+    not connected has no 'conversionAmount' ...), so looking only at the first row loses whole columns. Look at many rows."""
+    keymap = {f: None for f in KEYS}
+    for row in rows[:sample]:
+        cols = row.get("columns", row) if isinstance(row, dict) else {}
+        for f in KEYS:
+            if keymap[f] is None:
+                keymap[f] = _find_key(cols, f)
+        if all(v is not None for v in keymap.values()):
+            break
+    return keymap
+
+
 def extract_rows(data):
     """Rows are in response['callLog']['data'] OR response['report']['records']."""
     if isinstance(data, dict):
@@ -398,7 +412,7 @@ def fetch_range(start, end):
               "first_row_keys": sorted((raw_rows[0].get("columns", raw_rows[0]) if raw_rows else {}).keys())}
     if missing or not raw_rows:
         return [], report
-    keymap = {f: _find_key(raw_rows[0].get("columns", raw_rows[0]), f) for f in KEYS}
+    keymap = build_keymap(raw_rows)
     by_id = {}
     for r in raw_rows:
         rec = row_to_record(r, keymap)
@@ -407,6 +421,81 @@ def fetch_range(start, end):
         else:
             by_id[rec["call_id"]] = rec
     return list(by_id.values()), report
+
+
+# ---------- insights report: POST /v2/{accountId}/insights (one day, publisher + campaign + buyer) ----------
+INSIGHT_GROUPS = [("publisherName", "Publisher"), ("campaignName", "Campaign"), ("buyer", "Buyer")]
+INSIGHT_VALUES = ["callCount", "completedCalls", "connectedCallCount", "payoutCount", "convertedCalls", "nonConnectedCallCount",
+                  "duplicateCalls", "blockedCalls", "incompleteCalls", "conversionAmount", "payoutAmount", "profitGross",
+                  "totalCost", "callLengthInSeconds"]
+
+
+def insights_body(start, end, tzname="America/New_York"):
+    return {"reportStart": _z(start), "reportEnd": _z(end),
+            "groupByColumns": [{"column": c, "displayName": n} for c, n in INSIGHT_GROUPS],
+            "valueColumns": [{"column": c, "aggregateFunction": None} for c in INSIGHT_VALUES],
+            "orderByColumns": [{"column": "callCount", "direction": "desc"}],
+            "formatTimespans": False, "formatPercentages": False, "generateRollups": False,
+            "maxResultsPerGroup": 1000, "filters": [], "formatTimeZone": tzname}
+
+
+def _post_insights(url, headers, body):
+    """Retry 429 / 5xx after 2 then 4 seconds (as Ringba advises)."""
+    last = None
+    for wait in (0, 2, 4):
+        if wait:
+            _nap(wait)
+        _check_time()
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=_request_timeout(90))
+        except requests.RequestException as e:
+            last = f"network error: {e}"
+            continue
+        if r.status_code == 200:
+            return r
+        last = f"HTTP {r.status_code}: {r.text[:300]}"
+        if r.status_code in (401, 403):
+            raise RingbaError(f"Ringba refused the login ({last}). Check RINGBA_API_TOKEN and RINGBA_ACCOUNT_ID.")
+        if r.status_code not in (429, 500, 502, 503, 504):
+            raise RingbaError(f"Ringba insights failed ({last})")
+    raise RingbaError(f"Ringba insights failed after 3 tries: {last}")
+
+
+def _n(v):
+    try:
+        return float(v) if v not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def parse_insights(data):
+    """report.records[] -> list of dicts (publisher, campaign, buyer + the numbers)."""
+    rp = data.get("report") if isinstance(data, dict) else None
+    recs = rp.get("records") if isinstance(rp, dict) else None
+    out = []
+    for r in recs or []:
+        if not isinstance(r, dict):
+            continue
+        out.append({"publisher": as_str(r.get("publisherName")) or "(none)", "campaign": as_str(r.get("campaignName")) or "(none)",
+                    "buyer": as_str(r.get("buyer")) or "(none)",
+                    "calls": int(_n(r.get("callCount"))), "completed": int(_n(r.get("completedCalls"))),
+                    "connected": int(_n(r.get("connectedCallCount"))), "paid": int(_n(r.get("payoutCount"))),
+                    "converted": int(_n(r.get("convertedCalls"))), "not_connected": int(_n(r.get("nonConnectedCallCount"))),
+                    "duplicates": int(_n(r.get("duplicateCalls"))), "blocked": int(_n(r.get("blockedCalls"))),
+                    "incomplete": int(_n(r.get("incompleteCalls"))),
+                    "revenue": round(_n(r.get("conversionAmount")), 2), "payout": round(_n(r.get("payoutAmount")), 2),
+                    "profit": round(_n(r.get("profitGross")), 2), "cost": round(_n(r.get("totalCost")), 2),
+                    "seconds": int(_n(r.get("callLengthInSeconds")))})
+    return out
+
+
+def fetch_insights(start, end, tzname="America/New_York"):
+    """One time window (use one DAY at a time). Returns (rows, raw_record_count)."""
+    headers = _auth_headers()
+    headers["Accept"] = "application/json"
+    r = _post_insights(f"{BASE}/{config.RINGBA_ACCOUNT_ID}/insights", headers, insights_body(start, end, tzname))
+    rows = parse_insights(_json(r, "the insights report"))
+    return rows
 
 
 # ---------- numbers (DIDs): GET /v2/{accountId}/numbers ----------
@@ -600,6 +689,80 @@ def extract_target_items(data):
     return []
 
 
+_CAP_SKIP = ("sum", "capacity", "concurr", "amount", "revenue", "payout", "hour", "enabled", "isenabled", "capped", "type")
+
+
+def _cap_num(v):
+    """A cap can be a number, a numeric string, or a small object like {"value": 100, "enabled": true}."""
+    if isinstance(v, dict):
+        if v.get("enabled") is False or v.get("isEnabled") is False:
+            return None
+        for k in ("value", "cap", "limit", "max", "count", "amount"):
+            if k in v:
+                return cap_value(v[k])
+        return None
+    return cap_value(v)
+
+
+def find_caps(obj, _depth=0, _path=""):
+    """Look through a target (any depth) for its daily / monthly call caps. Ringba keeps them under different names
+    (dailyCap, schedule.dailyCap, globalCaps.daily ...). Returns ({'daily': n, 'monthly': n}, [(path, value) of every cap-like field])."""
+    found, seen = {}, []
+    if _depth > 5:
+        return found, seen
+    if isinstance(obj, dict):
+        per = str(obj.get("period") or obj.get("type") or obj.get("interval") or "").lower()
+        if per in ("daily", "day", "monthly", "month") and any(x in obj for x in ("cap", "value", "limit")):
+            n = _cap_num({"value": obj.get("cap", obj.get("value", obj.get("limit"))), "enabled": obj.get("enabled", True)})
+            seen.append((_path or "(object)", str(obj)[:60]))
+            if n:
+                found.setdefault("monthly" if per.startswith("month") else "daily", n)
+            return found, seen
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if any(x in kl for x in ("capacity", "concurr", "sumcap", "sumdaily", "summonthly")):
+                continue
+            path = f"{_path}.{k}" if _path else str(k)
+            if isinstance(v, (dict, list)) and not (isinstance(v, dict) and any(x in v for x in ("value", "cap", "limit"))):
+                f2, s2 = find_caps(v, _depth + 1, path)
+                for per, n in f2.items():
+                    found.setdefault(per, n)
+                seen.extend(s2)
+                if not ("cap" in kl and not any(x in kl for x in _CAP_SKIP[:3])):
+                    continue
+            if "cap" in kl and not any(x in kl for x in _CAP_SKIP):
+                n = _cap_num(v)
+                seen.append((path, v if not isinstance(v, (dict, list)) else str(v)[:60]))
+                if n:
+                    if "month" in kl:
+                        found.setdefault("monthly", n)
+                    elif "day" in kl or "daily" in kl:
+                        found.setdefault("daily", n)
+                    elif kl in ("dailycap",):
+                        found.setdefault("daily", n)
+                    elif _path.lower().endswith(("daily", "day")):
+                        found.setdefault("daily", n)
+                    elif _path.lower().endswith("monthly"):
+                        found.setdefault("monthly", n)
+            elif kl in ("daily", "day", "perday") and not isinstance(v, (dict, list)) and "cap" in _path.lower():
+                n = cap_value(v)
+                seen.append((path, v))
+                if n:
+                    found.setdefault("daily", n)
+            elif kl in ("monthly", "month", "permonth") and not isinstance(v, (dict, list)) and "cap" in _path.lower():
+                n = cap_value(v)
+                seen.append((path, v))
+                if n:
+                    found.setdefault("monthly", n)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:20]):
+            f2, s2 = find_caps(v, _depth + 1, f"{_path}[{i}]")
+            for per, n in f2.items():
+                found.setdefault(per, n)
+            seen.extend(s2)
+    return found, seen
+
+
 def parse_target(it):
     """One target from Ringba -> {'rid','name','buyer_rid','buyer_name','enabled','daily_cap','monthly_cap'} (or None)."""
     if not isinstance(it, dict):
@@ -607,18 +770,33 @@ def parse_target(it):
     rid = as_str(_pick(it, ["id", "targetId"]))
     if not rid:
         return None
-    sched = it.get("schedule") if isinstance(it.get("schedule"), dict) else {}
     buyer = it.get("buyer") if isinstance(it.get("buyer"), dict) else {}
     enabled = _pick(it, ["enabled", "isEnabled", "active", "isActive"])
     if enabled is None and isinstance(it.get("state"), str):
         enabled = it["state"].strip().lower() in ("enabled", "active", "on")
+    caps, seen = find_caps({k: v for k, v in it.items() if k not in ("buyer",)})
     return {"rid": rid, "name": as_str(_pick(it, ["name", "targetName"])) or rid,
             "buyer_rid": as_str(buyer.get("id") or _pick(it, ["buyerId"])),
             "buyer_name": as_str(buyer.get("name") or _pick(it, ["buyerName"]) or (it.get("buyer") if isinstance(it.get("buyer"), str) else None)),
             "enabled": True if enabled is None else bool(enabled),
-            "daily_cap": cap_value(_pick(sched, ["dailyCap"]) if sched else None),
-            "monthly_cap": cap_value(_pick(sched, ["monthlyCap"]) if sched else None),
-            "has_schedule": bool(sched)}
+            "daily_cap": caps.get("daily"), "monthly_cap": caps.get("monthly"),
+            "has_schedule": bool(caps), "cap_fields": seen}
+
+
+def target_cap_debug(target_id):
+    """For the 'check one target' button: every cap-like field Ringba returns for this target, from the list and from the full record."""
+    headers = _auth_headers()
+    acct = config.RINGBA_ACCOUNT_ID
+    out = {"target_id": target_id}
+    d = _json(_get(f"{BASE}/{acct}/targets/{target_id}", headers), f"target {target_id}")
+    if isinstance(d, dict) and isinstance(d.get("target"), dict):
+        d = d["target"]
+    t = parse_target(d) if isinstance(d, dict) else None
+    out["name"] = t["name"] if t else None
+    out["read_as"] = {"daily_cap": t["daily_cap"], "monthly_cap": t["monthly_cap"], "enabled": t["enabled"]} if t else None
+    out["cap_fields"] = [{"field": p, "value": v} for p, v in (t["cap_fields"] if t else [])]
+    out["top_level_keys"] = sorted(d)[:60] if isinstance(d, dict) else []
+    return out
 
 
 def fetch_targets(max_details=300):
@@ -633,10 +811,17 @@ def fetch_targets(max_details=300):
         if t is None:
             bad += 1
             continue
-        if not t["has_schedule"] and details < max_details:         # the list had no cap info: ask for this target in full
+        if not (t["daily_cap"] or t["monthly_cap"]) and details < max_details:     # no cap seen in the list: ask for this target in full
             details += 1
-            _nap(0.2)
-            d = _json(_get(f"{BASE}/{acct}/targets/{t['rid']}", headers), f"target {t['rid']}")
+            _nap(0.1)
+            try:
+                d = _json(_get(f"{BASE}/{acct}/targets/{t['rid']}", headers), f"target {t['rid']}")
+            except RingbaError as e:
+                if "ran out of time" in str(e):
+                    raise
+                # one target's full record failing must not stop the whole sync
+                out.append(t)
+                continue
             if isinstance(d, dict) and isinstance(d.get("target"), dict):
                 d = d["target"]
             full = parse_target({**it, **d}) if isinstance(d, dict) else None

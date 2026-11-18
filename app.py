@@ -110,6 +110,8 @@ def schema_ready():
         db.q1("SELECT thread_id FROM alerts LIMIT 1")
         db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
         db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count FROM tasks LIMIT 1")
+        db.q1("SELECT day, paid FROM daily_stats LIMIT 1")
+        db.q1("SELECT day FROM insight_days LIMIT 1")
         return True
     except Exception:
         return False
@@ -425,9 +427,23 @@ def page_dashboard():
     s, e = reports.utc_bounds(a, b)
     df = reports.load_calls(s, e)
     today = reports.today_local()
-    for col, label, sub in zip(st.columns(3), ["Today", "Yesterday", "Last 7 days"],
-                               [df[df["day"] == today] if not df.empty else df,
-                                df[df["day"] == today - timedelta(days=1)] if not df.empty else df, df]):
+    import insights as _ins
+    _t = _ins.today(now)
+    _off = {}
+    for _lab, _a, _b in (("Today", _t, _t), ("Yesterday", _t - timedelta(days=1), _t - timedelta(days=1)), ("Last 7 days", _t - timedelta(days=6), _t)):
+        if _ins.covered(_a, _b, now):
+            _off[_lab] = _ins.totals(_a, _b)
+    if len(_off) == 3:                                   # official Ringba numbers
+        for col, label in zip(st.columns(3), ["Today", "Yesterday", "Last 7 days"]):
+            t_ = _off[label]
+            col.markdown(f"**{label}**")
+            col.metric("Calls", f"{int(t_['calls']):,}")
+            col.caption(f"Connected {int(t_['connected'])} · Converted {int(t_['converted'])} · Paid {int(t_['paid'])} · Profit ${float(t_['profit']):,.2f}")
+        st.caption("Official numbers from the Ringba insights report.")
+    else:
+      for col, label, sub in zip(st.columns(3), ["Today", "Yesterday", "Last 7 days"],
+                                 [df[df["day"] == today] if not df.empty else df,
+                                  df[df["day"] == today - timedelta(days=1)] if not df.empty else df, df]):
         sm = reports.summary(sub)
         col.markdown(f"**{label}**")
         col.metric("Calls", sm["Calls"])
@@ -475,6 +491,65 @@ def cached_calls(s, e, pid, bid):
     return reports.load_calls(s, e, pid, bid)
 
 
+def official_block(a, b, pf="All", bf="All", key="off"):
+    """Numbers straight from the Ringba insights report (they match Ringba exactly)."""
+    import insights
+    pub = None if pf == "All" else pf
+    buy = None if bf == "All" else bf
+    now = db.now_utc()
+    if not insights.covered(a, b, now):
+        days = (b - a).days + 1
+        st.warning("The official Ringba numbers for these dates are not all loaded yet (the engine loads them automatically, a few days per run).")
+        if days <= 62 and st.button("⬇️ Load official numbers from Ringba now", key=f"{key}_load"):
+            n_ok, bad = 0, []
+            bar = st.progress(0.0)
+            d = a
+            try:
+                rc.set_deadline(240)
+                while d <= b:
+                    try:
+                        insights.sync_day(d, now)
+                        n_ok += 1
+                    except Exception as e:
+                        bad.append(f"{d}: {str(e)[:120]}")
+                        break
+                    bar.progress(min(1.0, (d - a).days / max(days - 1, 1)))
+                    d += timedelta(days=1)
+            finally:
+                rc.set_deadline(None)
+            set_flash("flash_off", "err" if bad else "ok", f"Loaded {n_ok} day(s)." + (" Problem: " + "; ".join(bad) if bad else ""))
+            st.rerun()
+        flash("flash_off")
+        return False
+    t = insights.totals(a, b, publisher=pub, buyer=buy)
+    calls, conn, rev = int(t["calls"]), int(t["connected"]), float(t["revenue"])
+    for col, k, v in zip(st.columns(6), ["Calls", "Connected", "Converted", "Paid", "Blocked", "Duplicates"],
+                         [calls, conn, int(t["converted"]), int(t["paid"]), int(t["blocked"]), int(t["duplicates"])]):
+        col.metric(k, f"{v:,}")
+    vals = [f"{conn / calls * 100:.1f}%" if calls else "0.0%", f"${rev:,.2f}", f"${float(t['payout']):,.2f}", f"${float(t['profit']):,.2f}",
+            f"{float(t['cost']):,.2f}".join(["$", ""]), f"{int(t['seconds'] / conn) if conn else 0}",
+            f"{float(t['profit']) / rev * 100:.1f}%" if rev else "-", f"${rev / calls:,.2f}" if calls else "-"]
+    labels = ["Connect %", "Revenue", "Payout", "Profit", "Total cost", "Avg talk (sec)", "Margin", "Revenue / call"]
+    for col, k, v in zip(st.columns(8), labels, vals):
+        col.metric(k, v)
+    tabs = st.tabs(["By publisher", "By campaign", "By buyer", "By day"])
+    for tab, by, nm in zip(tabs, ["publisher", "campaign", "buyer", "day"], ["Publisher", "Campaign", "Buyer", "Day"]):
+        with tab:
+            rows = insights.breakdown(a, b, by)
+            if pub and by != "publisher":
+                pass
+            df = pd.DataFrame(rows)
+            if df.empty:
+                st.caption("No calls.")
+                continue
+            df = df.rename(columns={"name": nm, "calls": "Calls", "connected": "Connected", "converted": "Converted", "paid": "Paid",
+                                    "blocked": "Blocked", "duplicates": "Duplicates", "revenue": "Revenue", "payout": "Payout", "profit": "Profit", "cost": "Cost"})
+            df["Connect %"] = (df["Connected"] / df["Calls"].where(df["Calls"] > 0) * 100).round(1)
+            df["Margin %"] = (df["Profit"] / df["Revenue"].where(df["Revenue"] > 0) * 100).round(1)
+            show_df(f"{key}_{by}", df[[nm, "Calls", "Connected", "Converted", "Paid", "Blocked", "Duplicates", "Connect %", "Revenue", "Payout", "Profit", "Margin %", "Cost"]])
+    return True
+
+
 def page_reports():
     st.caption("Reads from your stored calls. Times are in your timezone (Settings). Pick options, then press Show report.")
     pubs = db.q("SELECT id, name FROM publishers ORDER BY name")
@@ -515,6 +590,12 @@ def page_reports():
             if res["failures"]:
                 st.error("Some days failed: " + "; ".join(res["failures"][:5]))
 
+    st.subheader("Official numbers (Ringba insights report)")
+    st.caption("Straight from Ringba, one day at a time, cut at midnight in your timezone. Cap alerts use these numbers.")
+    official_block(a, b, pf, bf, key="off_rep")
+    st.subheader("From the stored calls")
+    st.caption("Built from the individual calls saved in the database. If this differs from the official numbers above, the stored calls are "
+               "out of date: use Sync & Import → Backfill to re-read them.")
     df = cached_calls(s, e, pid, bid)
     sm = reports.summary(df)
     for col, k in zip(st.columns(6), ["Calls", "Connected", "Converted", "Paid", "Blocked", "Duplicates"]):
@@ -1682,27 +1763,26 @@ def page_tasks():
     err_msg = st.session_state.pop("task_err", None)
     if err_msg:
         st.error(err_msg)
-    with st.container(border=True):
+    with st.form("task_add_form", border=True):
         st.text_input("Task (what to do)", key="task_title")
         c1, c2, c3 = st.columns(3)
         c1.date_input("Work date (do it on)", td, key="task_wd")
         c2.date_input("Alert date (e-mail me on)", td, key="task_ad", help="Can be earlier than the work date.")
         c3.selectbox("Alert time (AM/PM)", opts, index=opts.index(dflt) if dflt in opts else 36, key="task_at")
-        rep = st.selectbox("Repeat", tasks.REPEATS, format_func=lambda r: tasks.REPEAT_LABEL[r], key="task_rep",
-                           help="When you tick Done, a repeating task moves to its next date and the alert comes again.")
-        if rep == "custom":
-            st.number_input("Repeat every how many days?", 1, 365, 7, key="task_rdays")
-        elif rep == "pick_weekdays":
-            st.multiselect("Which days of the week?", tasks.WD_NAMES, default=["Mon"], key="task_wdays",
-                           help="Pick one or more. Example: Mon and Tue = every Monday and every Tuesday.")
-        elif rep == "pick_monthdays":
-            st.multiselect("Which days of the month?", tasks.MONTH_DAY_CHOICES, default=["15"], key="task_mdays",
-                           help="Pick one or more, for example 15 and 20. 'last' = the last day of the month. A short month uses its last day (31 in February = 28).")
-        elif rep == "pick_dates":
-            st.text_input("Which dates? (YYYY-MM-DD, separated by commas)", key="task_dates", placeholder="2026-12-01, 2026-12-15, 2027-01-10",
-                          help="Any dates you like. After the last one the task is finished.")
-        st.text_area("Note (optional)", key="task_notes", height=70)
-        st.button("➕ Add task", type="primary", key="task_add_btn", on_click=add_task_cb)
+        st.selectbox("Repeat", tasks.REPEATS, format_func=lambda r: tasks.REPEAT_LABEL[r], key="task_rep",
+                     help="When you tick Done, a repeating task moves to its next date and the alert comes again.")
+        st.caption("Repeat options: only the one that matches your **Repeat** choice above is used. Nothing changes on the page until you press **Add task**.")
+        r1, r2 = st.columns(2)
+        r1.number_input("Every N days: how many days?", 1, 365, 7, key="task_rdays")
+        r2.multiselect("Chosen weekdays: which days?", tasks.WD_NAMES, default=["Mon"], key="task_wdays",
+                       help="Pick one or more. Example: Mon and Tue = every Monday and every Tuesday.")
+        r3, r4 = st.columns(2)
+        r3.multiselect("Chosen month days: which days?", tasks.MONTH_DAY_CHOICES, default=["15"], key="task_mdays",
+                       help="Pick one or more, for example 15 and 20. 'last' = the last day of the month. A short month uses its last day (31 in February = 28).")
+        r4.text_input("Chosen dates (YYYY-MM-DD, separated by commas)", key="task_dates", placeholder="2026-12-01, 2026-12-15, 2027-01-10",
+                      help="Any dates you like. After the last one the task is finished.")
+        st.text_area("Note (optional): one point per line becomes a bullet in the e-mail", key="task_notes", height=70)
+        st.form_submit_button("➕ Add task", type="primary", on_click=add_task_cb)
 
     rows = tasks.open_tasks()
     state = {r["id"]: tasks.state_of(r, now) for r in rows}
@@ -1743,13 +1823,15 @@ def page_tasks():
                "Remove": st.column_config.CheckboxColumn("Remove", width="small", help="Deletes the task (the history stays)")}
         styled = df.style.apply(lambda r: [{"🔴": "background-color: rgba(255,75,75,0.18)", "🟠": "background-color: rgba(255,170,0,0.18)"}
                                             .get(str(r["Status"])[:1], "")] * len(r), axis=1) if len(df) else df
-        try:
-            ed = st.data_editor(styled, hide_index=True, use_container_width=True, key=f"task_editor_{sig}",
-                                disabled=["id", "Status", "Next e-mail"], column_order=order, column_config=cfg)
-        except Exception:
-            ed = st.data_editor(df, hide_index=True, use_container_width=True, key=f"task_editor_{sig}_plain",
-                                disabled=["id", "Status", "Next e-mail"], column_order=order, column_config=cfg)
-        if st.button("💾 Save changes", type="primary", key="task_save"):
+        with st.form("task_edit_form", border=False):
+            try:
+                ed = st.data_editor(styled, hide_index=True, use_container_width=True, key=f"task_editor_{sig}",
+                                    disabled=["id", "Status", "Next e-mail"], column_order=order, column_config=cfg)
+            except Exception:
+                ed = st.data_editor(df, hide_index=True, use_container_width=True, key=f"task_editor_{sig}_plain",
+                                    disabled=["id", "Status", "Next e-mail"], column_order=order, column_config=cfg)
+            save_tasks = st.form_submit_button("💾 Save changes", type="primary")
+        if save_tasks:
             done = changed = removed = 0
             errs = []
             back = {v: k for k, v in tasks.REPEAT_SHORT.items()}
@@ -1789,9 +1871,11 @@ def page_tasks():
         dn = db.q("SELECT id, title, done_at FROM tasks WHERE status='done' ORDER BY done_at DESC LIMIT 30")
         if dn:
             ddf = pd.DataFrame([{"id": r["id"], "Reopen": False, "Task": r["title"], "Done at": tasks.fmt_dt(r["done_at"])} for r in dn])
-            ded = st.data_editor(ddf, hide_index=True, use_container_width=True, key="task_done_editor", disabled=["id", "Task", "Done at"],
-                                 column_config={"id": None})
-            if st.button("Reopen ticked tasks", key="task_reopen"):
+            with st.form("task_reopen_form", border=False):
+                ded = st.data_editor(ddf, hide_index=True, use_container_width=True, key="task_done_editor", disabled=["id", "Task", "Done at"],
+                                     column_config={"id": None})
+                reopen_go = st.form_submit_button("Reopen ticked tasks")
+            if reopen_go:
                 for i in range(len(ddf)):
                     if ded.iloc[i]["Reopen"]:
                         tasks.reopen(int(ddf.iloc[i]["id"]))
@@ -1904,6 +1988,18 @@ def page_cap_overview():
             st.rerun()
         c2.caption((f"Last successful read: {ago(ok_t)}. " if ok_t else "Not read yet. ") + (f"Last problem: {err}" if err else ""))
         flash("flash_ov")
+        with st.expander("🔎 Check one target (shows what Ringba returns for its caps)"):
+            with st.form("ov_tg_check"):
+                tid = st.text_input("Target ID", placeholder="TAcad4568899b34ccca7bace74eca7b3f4", key="ov_tg_id")
+                go_c = st.form_submit_button("Check")
+            if go_c and tid.strip():
+                try:
+                    rc.set_deadline(60)
+                    st.json(rc.target_cap_debug(tid.strip()))
+                except Exception as e:
+                    st.error(f"Could not read it: {e}")
+                finally:
+                    rc.set_deadline(None)
         with_cap = [r for r in trows if r["has_cap"]]
         k1, k2, k3 = st.columns(3)
         k1.metric("Active targets", len(trows))

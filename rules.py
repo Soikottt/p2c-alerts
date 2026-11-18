@@ -129,11 +129,19 @@ def cap_usage(cap, now):
     col = ENTITY_COL[cap["entity_type"]]
     metric = METRIC_SQL.get(cap["metric"], METRIC_SQL["paid"])
     camp = (cap.get("campaign_name") or "").strip() if cap["entity_type"] == "publisher" else ""
-    usage = db.q1(f"SELECT COUNT(*) AS n FROM calls c WHERE c.{col}=:e AND c.call_at >= :s AND {metric}"
-                  + (" AND c.campaign_name = :camp" if camp else ""),
-                  e=cap["entity_id"], s=start, **({"camp": camp} if camp else {}))["n"]
     table = "publishers" if cap["entity_type"] == "publisher" else "buyers"
     ent = db.q1(f"SELECT name FROM {table} WHERE id=:i", i=cap["entity_id"])
+    usage = None
+    if ent:                                            # the official Ringba insights numbers first (they match Ringba exactly)
+        try:
+            import insights
+            usage = insights.usage(cap, ent["name"], cap["period"], now)
+        except Exception:
+            usage = None
+    if usage is None:                                  # not synced yet: count the stored calls
+        usage = db.q1(f"SELECT COUNT(*) AS n FROM calls c WHERE c.{col}=:e AND c.call_at >= :s AND {metric}"
+                      + (" AND c.campaign_name = :camp" if camp else ""),
+                      e=cap["entity_id"], s=start, **({"camp": camp} if camp else {}))["n"]
     pct = usage / cap["cap_value"] * 100 if cap["cap_value"] else 0
     name = ent["name"] if ent else "?"
     return {"usage": usage, "pct": pct, "start": start, "key": key, "name": f"{name} / campaign {camp}" if camp else name}

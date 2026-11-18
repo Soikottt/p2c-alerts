@@ -382,6 +382,21 @@ def digest_text(td, tasks=None):
     return "\n\n".join(parts), sum(len(v) for v in groups.values())
 
 
+def digest_html(td, tasks=None):
+    tasks = open_tasks() if tasks is None else tasks
+    groups = {"Overdue": [], "Today": [], "Reminder": []}
+    for t in tasks:
+        st = status_of(t, td)
+        if st in groups:
+            groups[st].append(t)
+    out = []
+    for key, head, color in (("Overdue", "OVERDUE", "#d93025"), ("Today", "DUE TODAY", "#1a73e8"), ("Reminder", "REMINDERS (work is later)", "#5f6368")):
+        if groups[key]:
+            out.append(f'<div style="font-size:13px;font-weight:bold;color:{color};margin:14px 0 6px 0;letter-spacing:.5px">{head} ({len(groups[key])})</div>')
+            out.append("".join(_card_html(i, t, False, color) for i, t in enumerate(groups[key], 1)))
+    return "".join(out)
+
+
 def _send_time():
     try:
         hh, mm = (db.get_setting("tasks_send_time", "08:00") or "08:00").split(":")
@@ -406,7 +421,7 @@ def run_digest(now=None, force=False):
     text, count = digest_text(td)
     if not count:
         return 0
-    ctx = {"date": f"{td:%a %d %b %Y}", "count": str(count), "task_list": text}
+    ctx = {"date": f"{td:%a %d %b %Y}", "count": str(count), "task_list": text, "task_list_html": digest_html(td)}
     key = f"tasks:{td.isoformat()}" + (f":now{int((now or db.now_utc()).timestamp())}" if force else "")
     return 1 if alerts.create_alert("task_digest", key, ctx) else 0
 
@@ -483,25 +498,71 @@ def next_alert_text(t, now=None):
     return f"follow-up #{n} at {due.strftime('%I:%M %p')}"
 
 
+def _note_lines(t):
+    """The note as separate lines (a '-', '*' or bullet in front is ignored)."""
+    out = []
+    for ln in str(t.get("notes") or "").replace("\r", "").split("\n"):
+        ln = ln.strip().lstrip("-*\u2022\u25cf").strip()
+        if ln:
+            out.append(ln[:300])
+    return out[:12]
+
+
 def _task_lines(items, now, followup):
-    tz = local_tz()
+    """Plain-text version (mail apps without HTML, Alert Log)."""
     out = []
     for i, t in enumerate(items, 1):
         wd, adt = pdate(t["work_date"]), alert_dt(t)
-        bits = []
+        lines = [f"{i}) {str(t['title']).upper()}"]
         if wd:
-            bits.append(f"work date {wd:%a %d %b}")
+            lines.append(f"   \u2022 Work date: {wd:%a %d %b %Y}")
         if adt:
-            bits.append(f"alert {adt:%a %d %b, %I:%M %p}")
+            lines.append(f"   \u2022 Alert: {adt:%a %d %b %Y, %I:%M %p}")
         if followup:
-            bits.append(f"alerted {t['alert_count']}x already")
-        line = f"{i}. {t['title']}"
-        if bits:
-            line += "\n   " + " | ".join(bits)
-        if (t["notes"] or "").strip():
-            line += "\n   Note: " + " ".join(t["notes"].split())[:300]
-        out.append(line)
-    return "\n\n".join(out)          # a blank line between tasks, so they are easy to tell apart in the e-mail
+            lines.append(f"   \u2022 Already alerted {t['alert_count']}x")
+        nl = _note_lines(t)
+        if nl:
+            lines.append("   \u2022 Note:")
+            lines += [f"       - {x}" for x in nl]
+        out.append("\n".join(lines))
+    return "\n\n".join(out)
+
+
+def _esc(v):
+    import html as _h
+    return _h.escape(str(v), quote=True)
+
+
+def _chip(label, value, bg, fg):
+    return (f'<span style="display:inline-block;background:{bg};color:{fg};border-radius:4px;padding:3px 8px;margin:2px 6px 2px 0;'
+            f'font-size:12px;white-space:nowrap"><span style="opacity:.8">{_esc(label)}</span> <b>{_esc(value)}</b></span>')
+
+
+def _card_html(n, t, followup, accent="#1a73e8", tag=""):
+    wd, adt = pdate(t["work_date"]), alert_dt(t)
+    chips = ""
+    if wd:
+        chips += _chip("\U0001F4C5 Work date", f"{wd:%a %d %b %Y}", "#e8f0fe", "#174ea6")
+    if adt:
+        chips += _chip("\u23F0 Alert", f"{adt:%a %d %b, %I:%M %p}", "#fef7e0", "#7a5200")
+    if followup:
+        chips += _chip("\U0001F501 Already alerted", f"{t['alert_count']}x", "#fce8e6", "#a50e0e")
+    if tag:
+        chips = _chip("", tag, accent, "#ffffff") + chips
+    nl = _note_lines(t)
+    notes = ""
+    if nl:
+        notes = ('<div style="margin-top:8px;font-size:12px;color:#5f6368;font-weight:bold;text-transform:uppercase;letter-spacing:.4px">Note</div>'
+                 '<ul style="margin:4px 0 0 18px;padding:0;font-size:14px;color:#202124">' + "".join(f'<li style="margin:2px 0">{_esc(x)}</li>' for x in nl) + "</ul>")
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 12px 0;border-collapse:collapse">'
+            f'<tr><td style="border-left:5px solid {accent};background:#f8f9fa;padding:10px 14px;border-radius:0 6px 6px 0">'
+            f'<div style="font-size:16px;font-weight:bold;color:#202124">{n}. {_esc(t["title"])}</div>'
+            f'<div style="margin-top:6px">{chips}</div>{notes}</td></tr></table>')
+
+
+def _task_cards_html(items, followup):
+    accent = "#d93025" if followup else "#1a73e8"
+    return "".join(_card_html(i, t, followup, accent) for i, t in enumerate(items, 1))
 
 
 def _send_group(items, now, heading, followup, key):
@@ -510,7 +571,7 @@ def _send_group(items, now, heading, followup, key):
     note = (f"If you do not tick Done in the app, a follow-up comes every {fm} minutes" + (f" (up to {fmax} times)." if fmax else ".")) if fm else ""
     ctx = {"heading": heading, "count": str(len(items)), "first_title": items[0]["title"],
            "now": local_now(now).strftime("%a %d %b %Y, %I:%M %p") + f" ({db.get_setting('tasks_timezone', 'Asia/Dhaka')})",
-           "task_list": _task_lines(items, now, followup), "app_url": app_url or "(set the app address in Settings)",
+           "task_list": _task_lines(items, now, followup), "task_list_html": _task_cards_html(items, followup), "app_url": app_url or "(set the app address in Settings)",
            "followup_note": note}
     if not alerts.create_alert("task_alert", key, ctx):
         return 0

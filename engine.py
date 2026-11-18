@@ -20,6 +20,7 @@ import ingest
 import mailer
 import rules
 import pubcaps
+import insights
 import targets
 import setup_db
 import ringba_client as rc
@@ -100,6 +101,18 @@ def run_once(log=_emit, time_limit=None):
             pass
     finally:
         rc.set_deadline(None)
+
+    # ---- 1a. official numbers from the Ringba insights report: today every run, yesterday hourly, missing days (cap alerts use them)
+    if elapsed() < limit - 160:
+        step("reading the official Ringba insights report")
+        rc.set_deadline(45)
+        try:
+            r = insights.run(now)
+            say(f"insights: days {', '.join(r['synced']) or 'none'} read" + (f"; FAILED: {'; '.join(r['failed'])}" if r["failed"] else ""))
+        except Exception as e:
+            say(f"insights FAILED (stored calls are used meanwhile): {e}")
+        finally:
+            rc.set_deadline(None)
 
     # ---- 1b. re-read one past day from Ringba, so late conversions / payouts / flags are picked up (optional)
     if elapsed() < limit - 150:

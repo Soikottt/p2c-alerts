@@ -260,3 +260,33 @@ CREATE TABLE IF NOT EXISTS task_log (
   event TEXT NOT NULL,
   detail TEXT
 );
+
+-- Official numbers from the Ringba "insights" report: one row per day + publisher + campaign + buyer
+CREATE TABLE IF NOT EXISTS daily_stats (
+  day DATE NOT NULL,
+  publisher TEXT NOT NULL,
+  campaign TEXT NOT NULL,
+  buyer TEXT NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0,
+  completed INTEGER NOT NULL DEFAULT 0,
+  connected INTEGER NOT NULL DEFAULT 0,
+  paid INTEGER NOT NULL DEFAULT 0,
+  converted INTEGER NOT NULL DEFAULT 0,
+  not_connected INTEGER NOT NULL DEFAULT 0,
+  duplicates INTEGER NOT NULL DEFAULT 0,
+  blocked INTEGER NOT NULL DEFAULT 0,
+  incomplete INTEGER NOT NULL DEFAULT 0,
+  revenue NUMERIC(14,2) NOT NULL DEFAULT 0,
+  payout NUMERIC(14,2) NOT NULL DEFAULT 0,
+  profit NUMERIC(14,2) NOT NULL DEFAULT 0,
+  cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+  seconds INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, publisher, campaign, buyer)
+);
+CREATE INDEX IF NOT EXISTS ix_daily_stats_day ON daily_stats (day);
+
+CREATE TABLE IF NOT EXISTS insight_days (
+  day DATE PRIMARY KEY,
+  synced_at TIMESTAMPTZ NOT NULL,
+  row_count INTEGER NOT NULL DEFAULT 0
+);

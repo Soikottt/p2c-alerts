@@ -137,7 +137,7 @@ SAMPLE["did_inactive"] = {"did": "+16143505503", "label": "Rehab line", "label_p
                           "next_step": "If nobody answers this email: a reminder is sent in 3 day(s) (reminder 1 of 3). If you click a 'wait' button, this DID is paused for those days and you get a follow-up email when the pause ends. The alert is never paused for ever."}
 SAMPLE["task_alert"] = {"heading": "Follow-up: still not done", "count": "2", "first_title": "Check weekend caps",
                         "now": "Mon 16 Nov 2026, 09:30 AM (Asia/Dhaka)",
-                        "task_list": "1. Check weekend caps\n   work date Mon 16 Nov | alert Mon 16 Nov, 09:00 AM | alerted 1x already\n   Note: ask Mia about Rehab\n\n2. Send invoices\n   work date Fri 13 Nov | alert Fri 13 Nov, 09:00 AM | alerted 3x already",
+                        "task_list": "1) CHECK WEEKEND CAPS\n   \u2022 Work date: Mon 16 Nov 2026\n   \u2022 Alert: Mon 16 Nov 2026, 09:00 AM\n   \u2022 Already alerted 1x\n   \u2022 Note:\n       - ask Mia about Rehab\n       - check Rehab FL cap\n\n2) SEND INVOICES\n   \u2022 Work date: Fri 13 Nov 2026\n   \u2022 Alert: Fri 13 Nov 2026, 09:00 AM\n   \u2022 Already alerted 3x",
                         "app_url": "https://your-app.streamlit.app",
                         "followup_note": "If you do not tick Done in the app, a follow-up comes every 30 minutes (up to 10 times)."}
 SAMPLE["task_digest"] = {"date": "Mon 16 Nov", "count": "3",
@@ -187,6 +187,13 @@ def _inline_text(s):
 
 def _value_html(v):
     return html.escape(str(v), quote=True).replace("\n", "<br>")
+
+
+# A placeholder X can come with a ready-made HTML version under the name X_html (built by our own code, already escaped).
+def _fill_html(ctx, name):
+    if ctx and name + "_html" in ctx:
+        return str(ctx[name + "_html"])
+    return _value_html(ctx[name]) if ctx and name in ctx else None
 
 
 def to_html(text, ctx=None):
@@ -239,7 +246,7 @@ def to_html(text, ctx=None):
         para.append(_inline_html(line))
     flush_para(); close_lists()
     body = "".join(out)
-    body = re.sub(r"\{(\w+)\}", lambda m: _value_html(ctx[m.group(1)]) if ctx and m.group(1) in ctx else m.group(0), body)
+    body = re.sub(r"\{(\w+)\}", lambda m: (_fill_html(ctx, m.group(1)) if _fill_html(ctx, m.group(1)) is not None else m.group(0)), body)
     return ('<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#222">' + body + "</div>")
 
 

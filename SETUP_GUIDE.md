@@ -494,3 +494,27 @@ Open **🎛️ Cap overview** in the left menu (right under Dashboard). Two tabs
 - Tick "Also show targets without a cap" to see the rest.
 
 All tables have the filter bar, and the Refresh button works on this page too.
+
+---
+
+## Update: official Ringba numbers, target caps, task e-mails, Save buttons
+
+**1. Connected / Converted / Paid showing 0 (fixed)**
+Ringba leaves a field out of a call when it is empty, and the app read the column names from the FIRST call only. Now it looks at many calls.
+The calls already stored with zeros stay wrong until you re-read them: Sync & Import → Backfill (35 days).
+
+**2. Official numbers from the Ringba insights report (new)**
+- The engine now calls `POST /v2/{accountId}/insights` (publisher + campaign + buyer, one day at a time, cut at midnight of your Settings timezone, default America/New_York). Today is read every 5 minutes, yesterday every hour, and missing days of the last 35 are filled in (4 per run).
+- **Cap alerts and Cap overview use these numbers** (paid = Ringba `payoutCount`, connected = `connectedCallCount`, converted = `convertedCalls`). If the official numbers are not loaded or are older than 20 minutes, the stored calls are used instead.
+- Reports page: new "Official numbers" block on top (by publisher / campaign / buyer / day, with Margin and Revenue per call). Press "Load official numbers from Ringba now" if days are missing. Dashboard Today / Yesterday / 7 days use them too.
+- A custom "day start" in Settings (not 00:00) switches this off for caps, because Ringba days start at midnight.
+- Needs the new tables: press "Set up / upgrade the database" if the app shows it (the engine also does this by itself).
+
+**3. Targets with caps not showing (fixed)**
+The app now looks for the daily / monthly cap anywhere in the Ringba target (schedule.dailyCap, dailyCap, globalCaps, caps list ...) and asks Ringba for the full target when the list has no cap. On **Cap overview → Buyer targets** press "Read targets from Ringba now". To see exactly what Ringba says about one target, open "Check one target" and paste its Target ID.
+
+**4. Task e-mails**
+Each task is a card: bold title, Work date and Alert time as coloured labels, and the note as bullets (one line of the note = one bullet). Write one point per line in the Note box.
+
+**5. Save buttons**
+The My Tasks page no longer reloads on every change: the add form and the task table only act when you press their button. (The other pages already worked this way.) The filter and view pickers still refresh the page, because they only change what you see.

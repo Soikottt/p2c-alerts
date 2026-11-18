@@ -190,6 +190,8 @@ def ensure_columns():
         db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
         db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count FROM tasks LIMIT 1")
         db.q1("SELECT event FROM task_log LIMIT 1")
+        db.q1("SELECT day, paid FROM daily_stats LIMIT 1")
+        db.q1("SELECT day FROM insight_days LIMIT 1")
         return False
     except Exception:
         run(log=lambda m: None, migrate=False)          # safe to repeat: every step is 'IF NOT EXISTS' / 'ON CONFLICT DO NOTHING'
