@@ -1850,13 +1850,14 @@ def page_tasks():
                             "Alert time": tasks.fmt_time(r["alert_time"] or tasks.default_time()), "Repeat": tasks.REPEAT_SHORT[r["repeat"]],
                             "Repeat details": (str(r["repeat_days"] or "") if r["repeat"] == "custom" else tasks.rule_text(r["repeat"], r["repeat_rule"])),
                             "Next e-mail": tasks.next_alert_text(r, now),
-                            "Details": " / ".join(x.strip() for x in tasks.note_text(r).split("\n") if x.strip())[:160], "Remove": False} for r in shown])
+                            "Details": " / ".join(x.strip() for x in tasks.note_text(r).split("\n") if x.strip())[:3000], "Remove": False} for r in shown])
         df, sig = filter_bar("tasks", df, skip=("Task", "Details", "Next e-mail", "id", "Repeat details", "Created"))
-        order = ["Done", "Status", "Created", "Task", "Details", "Work date", "Alert date", "Alert time", "Repeat", "Repeat details", "Next e-mail", "Remove"]
+        default_order = ["id", "Done", "Status", "Created", "Task", "Details", "Work date", "Alert date", "Alert time", "Repeat", "Repeat details", "Next e-mail", "Remove"]
+        df = df[[c for c in default_order if c in df.columns]]          # starting order; your own saved order (below) wins
         cfg = {"id": None, "Done": st.column_config.CheckboxColumn("Done", width="small"),
                "Status": st.column_config.TextColumn("Status", width="medium"),
                "Task": st.column_config.TextColumn("Task subject"), "Created": st.column_config.TextColumn("Created (Dhaka)"),
-               "Details": st.column_config.TextColumn("Details (edit below)"),
+               "Details": st.column_config.TextColumn("Details (double-click to read all)", width="large", help="Double-click a cell to read the full note. To change it, use Edit a task below."),
                "Work date": st.column_config.DateColumn("Work date", format="ddd DD MMM YYYY"),
                "Alert date": st.column_config.DateColumn("Alert date", format="ddd DD MMM YYYY"),
                "Alert time": st.column_config.SelectboxColumn("Alert time", options=opts, required=True),
@@ -1864,6 +1865,7 @@ def page_tasks():
                "Repeat details": st.column_config.TextColumn("Repeat details", help="Every N days: the number. Chosen weekdays: Mon, Tue. "
                                                              "Chosen month days: 15, 20, last. Chosen dates: 2026-12-01, 2026-12-15."),
                "Remove": st.column_config.CheckboxColumn("Remove", width="small", help="Deletes the task (the history stays)")}
+        order, cfg = view_controls("tasks", df, cfg)                     # same "Arrange columns / column width" box as the other tables
         styled = df.style.apply(lambda r: [{"🔴": "background-color: rgba(255,75,75,0.18)", "🟠": "background-color: rgba(255,170,0,0.18)"}
                                             .get(str(r["Status"])[:1], "")] * len(r), axis=1) if len(df) else df
         with st.form("task_edit_form", border=False):
