@@ -47,7 +47,7 @@ def sync_definitions(now=None):
     unchecked = set(report.get("unchecked", []))
     by_rid, by_name = _buyer_lookup()
     from_calls = None
-    have = {r["ringba_target_id"]: r for r in db.q("SELECT id, ringba_target_id, buyer_id FROM targets")}
+    have = {r["ringba_target_id"]: r for r in db.q("SELECT id, ringba_target_id, name, buyer_id, buyer_name, active, daily_cap, monthly_cap FROM targets")}
     added = updated = 0
     seen = set()
     for t in items:
@@ -63,15 +63,26 @@ def sync_definitions(now=None):
                  "VALUES (:r,:n,:b,:bn,:a,:d,:m,:s)", r=t["rid"], n=t["name"], b=bid, bn=t["buyer_name"], a=t["enabled"],
                  d=t["daily_cap"], m=t["monthly_cap"], s=now)
             added += 1
-        elif t["rid"] in unchecked:                      # time ran out before its caps were read: keep the caps we already have
-            db.x("UPDATE targets SET name=:n, buyer_id=COALESCE(:b, buyer_id), buyer_name=COALESCE(:bn, buyer_name), active=:a, synced_at=:s WHERE id=:i",
-                 n=t["name"], b=bid, bn=t["buyer_name"], a=t["enabled"], s=now, i=row["id"])
-            updated += 1
         else:
-            db.x("UPDATE targets SET name=:n, buyer_id=COALESCE(:b, buyer_id), buyer_name=COALESCE(:bn, buyer_name), active=:a, "
-                 "daily_cap=:d, monthly_cap=:m, synced_at=:s WHERE id=:i", n=t["name"], b=bid, bn=t["buyer_name"], a=t["enabled"],
-                 d=t["daily_cap"], m=t["monthly_cap"], s=now, i=row["id"])
+            # Only write what really changed: one database round trip costs about a second on a remote database, and a few hundred
+            # unchanged targets used to take minutes and made the whole engine run time out.
+            keep_caps = t["rid"] in unchecked            # time ran out before its caps were read: keep the caps we already have
+            new_bid = bid if bid is not None else row["buyer_id"]
+            new_bn = t["buyer_name"] if t["buyer_name"] else row["buyer_name"]
+            same = (row["name"] == t["name"] and row["buyer_id"] == new_bid and row["buyer_name"] == new_bn
+                    and bool(row["active"]) == bool(t["enabled"])
+                    and (keep_caps or (row["daily_cap"] == t["daily_cap"] and row["monthly_cap"] == t["monthly_cap"])))
+            if same:
+                continue
+            if keep_caps:
+                db.x("UPDATE targets SET name=:n, buyer_id=:b, buyer_name=:bn, active=:a, synced_at=:s WHERE id=:i",
+                     n=t["name"], b=new_bid, bn=new_bn, a=t["enabled"], s=now, i=row["id"])
+            else:
+                db.x("UPDATE targets SET name=:n, buyer_id=:b, buyer_name=:bn, active=:a, daily_cap=:d, monthly_cap=:m, synced_at=:s WHERE id=:i",
+                     n=t["name"], b=new_bid, bn=new_bn, a=t["enabled"], d=t["daily_cap"], m=t["monthly_cap"], s=now, i=row["id"])
             updated += 1
+    if items:
+        db.x("UPDATE targets SET synced_at=:s WHERE synced_at IS NULL OR synced_at < :s", s=now)      # one statement for "checked just now"
     gone = 0
     if items:                                           # a target deleted in Ringba stops alerting
         for rid, row in have.items():
