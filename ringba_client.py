@@ -692,6 +692,9 @@ def extract_target_items(data):
 _CAP_SKIP = ("sum", "capacity", "concurr", "amount", "revenue", "payout", "hour", "enabled", "isenabled", "capped", "type")
 
 
+_LIMITISH = re.compile(r"(per_?day|per_?month|daily|monthly)_?(call)?s?_?(cap|limit|max)|(cap|limit|max)_?(calls_?)?(per_?day|per_?month|daily|monthly)|^(calls|max_?calls)_?per_?(day|month)$")
+
+
 def _cap_num(v):
     """A cap can be a number, a numeric string, or a small object like {"value": 100, "enabled": true}."""
     if isinstance(v, dict):
@@ -704,6 +707,25 @@ def _cap_num(v):
     return cap_value(v)
 
 
+_PERIOD_KEYS = ("period", "type", "captype", "capperiod", "interval", "timeframe", "frequency", "unit", "timeunit", "resetperiod", "duration", "cap_type")
+_VALUE_KEYS = ("cap", "value", "limit", "capvalue", "calls", "max", "maximum", "count", "amount", "callcap", "capamount", "total")
+
+
+def _period_of(obj):
+    """'daily' / 'monthly' when this small object says which period it is for (Day, PerDay, Daily, Calls Per Day, Month ...)."""
+    low = {re.sub(r"[^a-z]", "", str(k).lower()): k for k in obj}
+    for pk in _PERIOD_KEYS:
+        k = low.get(re.sub(r"[^a-z]", "", pk))
+        if k is None or not isinstance(obj[k], str):
+            continue
+        v = re.sub(r"[^a-z]", "", obj[k].lower())
+        if "month" in v:
+            return "monthly"
+        if v in ("day", "daily", "perday", "calendarday") or v.endswith("perday") or v.endswith("day") and "hour" not in v:
+            return "daily"
+    return None
+
+
 def find_caps(obj, _depth=0, _path=""):
     """Look through a target (any depth) for its daily / monthly call caps. Ringba keeps them under different names
     (dailyCap, schedule.dailyCap, globalCaps.daily ...). Returns ({'daily': n, 'monthly': n}, [(path, value) of every cap-like field])."""
@@ -711,13 +733,17 @@ def find_caps(obj, _depth=0, _path=""):
     if _depth > 5:
         return found, seen
     if isinstance(obj, dict):
-        per = str(obj.get("period") or obj.get("type") or obj.get("interval") or "").lower()
-        if per in ("daily", "day", "monthly", "month") and any(x in obj for x in ("cap", "value", "limit")):
-            n = _cap_num({"value": obj.get("cap", obj.get("value", obj.get("limit"))), "enabled": obj.get("enabled", True)})
-            seen.append((_path or "(object)", str(obj)[:60]))
-            if n:
-                found.setdefault("monthly" if per.startswith("month") else "daily", n)
-            return found, seen
+        per = _period_of(obj)
+        if per:
+            lowk = {re.sub(r"[^a-z]", "", str(k).lower()): k for k in obj}
+            raw = next((obj[lowk[vk]] for vk in _VALUE_KEYS if vk in lowk and not isinstance(obj[lowk[vk]], (dict, list))), None)
+            if raw is not None:
+                off = any(obj.get(k) is False for k in ("enabled", "isEnabled", "active", "isActive"))
+                n = None if off else cap_value(raw)
+                seen.append((_path or "(object)", str(obj)[:80]))
+                if n:
+                    found.setdefault(per, n)
+                return found, seen
         for k, v in obj.items():
             kl = str(k).lower()
             if any(x in kl for x in ("capacity", "concurr", "sumcap", "sumdaily", "summonthly")):
@@ -730,7 +756,12 @@ def find_caps(obj, _depth=0, _path=""):
                 seen.extend(s2)
                 if not ("cap" in kl and not any(x in kl for x in _CAP_SKIP[:3])):
                     continue
-            if "cap" in kl and not any(x in kl for x in _CAP_SKIP):
+            if _LIMITISH.search(kl) and not any(x in kl for x in _CAP_SKIP[:6]) and not isinstance(v, (dict, list)):
+                n = cap_value(v)
+                seen.append((path, v))
+                if n:
+                    found.setdefault("monthly" if "month" in kl else "daily", n)
+            elif "cap" in kl and not any(x in kl for x in _CAP_SKIP):
                 n = _cap_num(v)
                 seen.append((path, v if not isinstance(v, (dict, list)) else str(v)[:60]))
                 if n:
@@ -796,7 +827,27 @@ def target_cap_debug(target_id):
     out["read_as"] = {"daily_cap": t["daily_cap"], "monthly_cap": t["monthly_cap"], "enabled": t["enabled"]} if t else None
     out["cap_fields"] = [{"field": p, "value": v} for p, v in (t["cap_fields"] if t else [])]
     out["top_level_keys"] = sorted(d)[:60] if isinstance(d, dict) else []
+    out["enabled_flags_in_record"] = {k: d[k] for k in d if k in ("enabled", "isEnabled", "active", "isActive", "state", "status")} if isinstance(d, dict) else {}
+    out["every_field_that_looks_like_a_cap"] = _capish_fields(d)
     return out
+
+
+def _capish_fields(obj, path="", depth=0, acc=None):
+    """Every field (any depth) whose name mentions cap / limit / day / month / global / schedule, with its value. For the 'check one target' button."""
+    acc = [] if acc is None else acc
+    if depth > 7 or len(acc) > 120:
+        return acc
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{path}.{k}" if path else str(k)
+            if re.search(r"cap|limit|day|month|global|schedule|quota|max", str(k), re.I):
+                acc.append({"field": p, "value": (v if not isinstance(v, (dict, list)) else json.dumps(v)[:300])})
+            if isinstance(v, (dict, list)):
+                _capish_fields(v, p, depth + 1, acc)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:25]):
+            _capish_fields(v, f"{path}[{i}]", depth + 1, acc)
+    return acc
 
 
 def _target_detail(headers, acct, rid, it):
@@ -807,7 +858,7 @@ def _target_detail(headers, acct, rid, it):
     return parse_target({**it, **d}) if isinstance(d, dict) else None
 
 
-def fetch_targets(max_details=300, skip_details=None, workers=6):
+def fetch_targets(max_details=2000, skip_details=None, workers=6):
     """Every buyer target on the account with its daily / monthly cap. Returns (list, report).
     Targets whose list entry shows no cap are asked for in full, several at the same time. `skip_details` = ids already known to
     have no cap (not asked again). When the time budget ends, the targets not yet checked are listed in report['unchecked'] and

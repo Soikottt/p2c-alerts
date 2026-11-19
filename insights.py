@@ -132,3 +132,44 @@ def breakdown(first_day, last_day, by):
     cols = ", ".join(f"COALESCE(SUM({c}),0) AS {c}" for c in SUM_COLS)
     return db.q(f"SELECT {by} AS name, {cols} FROM daily_stats WHERE day >= :a AND day <= :b GROUP BY {by} ORDER BY SUM(calls) DESC",
                 a=first_day, b=last_day)
+
+
+class Usage:
+    """Cap usage for MANY caps at once. usage() asks the database 3 times for every single cap; this asks 4 times in total, whatever the
+    number of caps (the Cap overview page was slow because of that). get() gives the same number as usage(), or None when the official
+    numbers do not cover the window (then the caller counts the stored calls)."""
+    def __init__(self, now=None):
+        self.now = now or db.now_utc()
+        self.ok = (db.get_setting("day_start", "00:00") or "00:00").strip() in ("00:00", "0:00")
+        self.win = {}
+        if not self.ok:
+            return
+        t = today(self.now)
+        for period, first in (("daily", t), ("monthly", t.replace(day=1))):
+            if not covered(first, t, self.now):
+                continue
+            rows = db.q("SELECT publisher, campaign, buyer, " + ", ".join(f"COALESCE(SUM({c}),0) AS {c}" for c in SUM_COLS)
+                        + " FROM daily_stats WHERE day >= :a AND day <= :b GROUP BY publisher, campaign, buyer", a=first, b=t)
+            self.win[period] = rows
+
+    @staticmethod
+    def _n(v):
+        return str(v or "").strip().lower()
+
+    def get(self, cap, name, period):
+        rows = self.win.get(period)
+        if rows is None:
+            return None
+        col = METRIC_COL.get(cap["metric"], "paid")
+        nm = self._n(name)
+        total = 0
+        if cap["entity_type"] == "publisher":
+            camp = (cap.get("campaign_name") or "").strip().lower()
+            for r in rows:
+                if self._n(r["publisher"]) == nm and (not camp or self._n(r["campaign"]) == camp):
+                    total += int(r[col] or 0)
+        else:
+            for r in rows:
+                if self._n(r["buyer"]) == nm:
+                    total += int(r[col] or 0)
+        return total

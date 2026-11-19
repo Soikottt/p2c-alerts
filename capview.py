@@ -18,10 +18,12 @@ def publisher_caps(now=None):
     names = {p["id"]: p["name"] for p in db.q("SELECT id, name FROM publishers")}
     n_dids = {r["publisher_id"]: r["n"] for r in db.q("SELECT publisher_id, COUNT(*) AS n FROM dids WHERE status='active' AND publisher_id IS NOT NULL GROUP BY publisher_id")}
     detail = []
+    import insights
+    ins = insights.Usage(now)                                   # all usage numbers in 3-4 queries, not 3 per cap
     for c in db.q("SELECT * FROM caps WHERE entity_type='publisher' AND active = TRUE"):
         if not dids.cap_has_active_did(c, links):
             continue
-        u = rules.cap_usage(c, now)
+        u = rules.cap_usage(c, now, ent_name=names.get(c["entity_id"]), ins=ins)
         detail.append({"publisher": names.get(c["entity_id"], "?"), "pid": c["entity_id"], "campaign": c["campaign_name"] or "(all campaigns)",
                        "period": c["period"], "counts": c["metric"], "cap": c["cap_value"], "used": u["usage"], "pct": _pct(u["usage"], c["cap_value"]),
                        "source": "Ringba" if c.get("source") == "ringba" else "typed by you"})
@@ -53,15 +55,15 @@ def publisher_caps(now=None):
     return rows, detail
 
 
-def target_caps():
-    """One row per ACTIVE buyer target: its global (whole-target) daily and monthly cap and usage, from Ringba."""
+def target_caps(include_disabled=False):
+    """One row per buyer target (active ones, or all with include_disabled): its global (whole-target) daily and monthly cap and usage, from Ringba."""
     out = []
-    for t in db.q("SELECT * FROM targets WHERE active = TRUE ORDER BY buyer_name, name"):
+    for t in db.q("SELECT * FROM targets" + ("" if include_disabled else " WHERE active = TRUE") + " ORDER BY buyer_name, name"):
         dc, mc = t["daily_cap"], t["monthly_cap"]
-        out.append({"buyer": t["buyer_name"] or "", "target": t["name"] or t["ringba_target_id"],
+        out.append({"buyer": t["buyer_name"] or "", "target": t["name"] or t["ringba_target_id"], "target_id": t["ringba_target_id"],
                     "daily_cap": dc, "used_today": (t["count_day"] or 0) if dc else None, "today_pct": _pct(t["count_day"] or 0, dc),
                     "monthly_cap": mc, "used_month": (t["count_month"] or 0) if mc else None, "month_pct": _pct(t["count_month"] or 0, mc),
-                    "alerts_on": bool(t["alerts_on"]), "usage_read": t["counts_at"], "has_cap": bool(dc or mc)})
+                    "alerts_on": bool(t["alerts_on"]), "usage_read": t["counts_at"], "has_cap": bool(dc or mc), "enabled": bool(t["active"])})
     return out
 
 

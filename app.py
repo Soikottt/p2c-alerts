@@ -2055,7 +2055,8 @@ def page_cap_overview():
                 else:
                     st.caption("No caps.")
     with tgt_tab:
-        trows = capview.target_caps()
+        all_t = capview.target_caps(include_disabled=True)
+        trows = [r for r in all_t if r["enabled"]]
         ok_t, err = db.get_setting("targets_last_ok", ""), db.get_setting("targets_last_error", "")
         c1, c2 = st.columns([1, 3])
         if c1.button("🔄 Read targets from Ringba now", key="ov_tg_sync"):
@@ -2081,28 +2082,36 @@ def page_cap_overview():
             if go_c and tid.strip():
                 try:
                     rc.set_deadline(60)
-                    st.json(rc.target_cap_debug(tid.strip()))
+                    dbg = rc.target_cap_debug(tid.strip())
+                    st.json(dbg)
+                    st.caption("Copy everything above and send it to me if the caps are not read correctly.")
                 except Exception as e:
                     st.error(f"Could not read it: {e}")
                 finally:
                     rc.set_deadline(None)
         with_cap = [r for r in trows if r["has_cap"]]
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Active targets", len(trows))
-        k2.metric("...with a daily or monthly cap", len(with_cap))
-        k3.metric("Without a cap", len(trows) - len(with_cap))
-        if not trows:
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Targets saved", len(all_t))
+        k2.metric("Active targets", len(trows))
+        k3.metric("...with a daily or monthly cap", len(with_cap))
+        k4.metric("Disabled in Ringba", len(all_t) - len(trows))
+        if not all_t:
             st.info("No target is saved yet. Press the button above to read the targets from Ringba.")
         else:
             st.markdown("**Global cap of each active target** (the cap on the whole target, whoever sends the calls)")
-            inc = st.checkbox("Also show targets without a cap", key="ov_tg_nocap")
-            df = pd.DataFrame([{k: v for k, v in r.items() if k not in ("has_cap",)} for r in (trows if inc else with_cap)])
+            o1, o2 = st.columns(2)
+            inc = o1.checkbox("Also show targets without a cap", key="ov_tg_nocap")
+            inc_off = o2.checkbox("Also show disabled targets", key="ov_tg_off")
+            base = all_t if inc_off else trows
+            df = pd.DataFrame([{k: v for k, v in r.items() if k not in ("has_cap",)} for r in (base if inc else [r for r in base if r["has_cap"]])])
             if df.empty:
-                st.info("None of the active targets has a daily or monthly cap in Ringba.")
+                st.info("None of the targets shown has a daily or monthly cap saved. If a target has a cap in Ringba, use "
+                        "'Check one target' above with its ID and send me what it shows.")
             else:
                 df["usage_read"] = df["usage_read"].map(lambda v: ago(v) if v else "never")
                 show_df("ov_tg", df.sort_values(["today_pct", "month_pct"], ascending=False, na_position="last"), column_config={
-                    "buyer": "Buyer", "target": "Target", "daily_cap": st.column_config.NumberColumn("Daily cap"),
+                    "buyer": "Buyer", "target": "Target", "target_id": "Target ID", "enabled": st.column_config.CheckboxColumn("Enabled in Ringba"),
+                    "daily_cap": st.column_config.NumberColumn("Daily cap"),
                     "used_today": st.column_config.NumberColumn("Used today"), "today_pct": prog("Today %"),
                     "monthly_cap": st.column_config.NumberColumn("Monthly cap"), "used_month": st.column_config.NumberColumn("Used this month"),
                     "month_pct": prog("Month %"), "alerts_on": st.column_config.CheckboxColumn("Alerts on"), "usage_read": "Usage read"})

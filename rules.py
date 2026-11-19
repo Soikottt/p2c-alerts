@@ -123,19 +123,23 @@ def rule_watchlist_buyer(now):
     return made
 
 
-def cap_usage(cap, now):
-    """How much of a cap is used right now. Returns dict(usage, pct, start, key, name)."""
+def cap_usage(cap, now, ent_name=None, ins=None):
+    """How much of a cap is used right now. Returns dict(usage, pct, start, key, name).
+    ent_name / ins (an insights.Usage) are optional: the Cap overview passes them so it does not ask the database again for every cap."""
     start, key = window_start(cap["period"], now)
     col = ENTITY_COL[cap["entity_type"]]
     metric = METRIC_SQL.get(cap["metric"], METRIC_SQL["paid"])
     camp = (cap.get("campaign_name") or "").strip() if cap["entity_type"] == "publisher" else ""
     table = "publishers" if cap["entity_type"] == "publisher" else "buyers"
-    ent = db.q1(f"SELECT name FROM {table} WHERE id=:i", i=cap["entity_id"])
+    ent = {"name": ent_name} if ent_name is not None else db.q1(f"SELECT name FROM {table} WHERE id=:i", i=cap["entity_id"])
     usage = None
     if ent:                                            # the official Ringba insights numbers first (they match Ringba exactly)
         try:
-            import insights
-            usage = insights.usage(cap, ent["name"], cap["period"], now)
+            if ins is not None:
+                usage = ins.get(cap, ent["name"], cap["period"])
+            else:
+                import insights
+                usage = insights.usage(cap, ent["name"], cap["period"], now)
         except Exception:
             usage = None
     if usage is None:                                  # not synced yet: count the stored calls
