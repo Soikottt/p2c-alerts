@@ -1068,11 +1068,15 @@ def targets_section():
     c1, c2 = st.columns([1, 3])
     if c1.button("🔄 Read targets from Ringba now", key="tg_sync"):
         try:
-            rc.set_deadline(120)
+            rc.set_deadline(240)
             r = tg.run(force=True)
             d, u = r["definitions"], r["usage"]
-            set_flash("flash_targets", "ok", f"Ringba has {d['in_ringba']} targets: {d['report']['with_daily_cap']} with a daily cap, "
-                      f"{d['report']['with_monthly_cap']} with a monthly cap. Usage read for {u['polled']} of {u['total']}.")
+            msg = (f"Ringba has {d['in_ringba']} targets: {d['report']['with_daily_cap']} with a daily cap, "
+                   f"{d['report']['with_monthly_cap']} with a monthly cap. Usage read for {u['polled']} of {u['total']}.")
+            if d.get("partial"):
+                msg += (f" {d['unchecked']} targets are still waiting (Ringba is slow right now). Nothing was lost: they are read automatically "
+                        "on the next 5-minute run, or press the button again.")
+            set_flash("flash_targets", "ok", msg)
         except Exception as e:
             set_flash("flash_targets", "err", f"Could not read targets: {e}")
         finally:
@@ -1243,6 +1247,8 @@ def page_emails():
 
 # ================================================================== TEMPLATES & ANSWER BUTTONS
 def page_templates():
+    import tasks
+    import richnote
     flash("flash_tpl")
     rules_ = db.q("SELECT alert_type, label, description, template_id FROM alert_rules ORDER BY label")
     by_label = {r["label"]: r for r in rules_}
@@ -1265,23 +1271,26 @@ def page_templates():
 
     with st.expander("Placeholders you can use in the subject and message"):
         st.markdown("\n".join(f"- `{{{k}}}`: {d}" for k, d in templates.PLACEHOLDERS[atype]))
-    with st.expander("✍️ Formatting: bold, bullets, numbers, links (type these in the message)"):
-        st.markdown("The message is turned into a proper email. Type the left column; the email shows the right column.")
-        st.markdown("\n".join(f"- `{a_}`  →  {b_}" for a_, b_ in templates.FORMAT_HELP))
-        st.caption("Example:  `**Decision needed:** release {did}?`  then a line  `- **Publisher:** {publisher}`.  "
-                   "Press Preview to see exactly how it will look.")
+    with st.expander("✍️ Formatting: use the buttons and shortcuts in the message box"):
+        st.markdown("The message box works like an email editor (bold, colours, bullets, numbers, links, headings). "
+                    "Press the ⌨ button in the box to see the shortcuts (Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+K link, Ctrl+Shift+8 bullets ...).")
+        st.caption("Type placeholders like {campaign} as normal text. You can make them bold or coloured too. "
+                   "Press Preview to see exactly how the email will look. Old templates are converted when you open them; they keep working until you save.")
     ver = st.session_state.get("tplver", 0)
     kk = f"{atype}_{t['id']}_{ver}"
     with st.form(f"tpl_form_{kk}"):
         name = st.text_input("Template name", t["name"], key=f"tpl_name_{kk}")
         subject = st.text_input("Subject", t["subject"], key=f"tpl_subj_{kk}")
-        body = st.text_area("Message / note", t["body"], height=280, key=f"tpl_body_{kk}")
+        st.caption("Message (write it like an email; type placeholders such as {campaign} where the real value should go)")
+        body_in = richnote.rich_note(templates.to_editor_html(t["body"]), key=f"tpl_body_{kk}", height=340)
+        body = richnote.value(f"tpl_body_{kk}") or body_in or ""
         c1, c2, c3 = st.columns(3)
         save = c1.form_submit_button("💾 Save changes")
         save_new = c2.form_submit_button("➕ Save as NEW template")
         preview = c3.form_submit_button("👁 Preview")
     now = db.now_utc()
     if save or save_new:
+        body = tasks.clean_note(body)                    # safe HTML (empty when nothing was typed)
         if not (subject or "").strip() or not (body or "").strip():
             set_flash("flash_tpl", "err", "Subject and message cannot be empty.")
         elif save:
@@ -1782,7 +1791,7 @@ def page_tasks():
     with st.form("task_add_form", border=True):
         st.text_input("Task subject (this becomes the e-mail subject)", key="task_title", placeholder="For example: Call Rehab buyer about the cap")
         st.markdown("**Details: what to do** (optional)")
-        richnote.rich_note("", key=note_key, height=240)
+        richnote.rich_note("", key=note_key, height=320)
         c1, c2, c3 = st.columns(3)
         c1.date_input("Work date (do it on)", td, key="task_wd")
         c2.date_input("Alert date (e-mail me on)", td, key="task_ad", help="Can be earlier than the work date.")
@@ -1843,7 +1852,7 @@ def page_tasks():
                             "Next e-mail": tasks.next_alert_text(r, now),
                             "Details": " / ".join(x.strip() for x in tasks.note_text(r).split("\n") if x.strip())[:160], "Remove": False} for r in shown])
         df, sig = filter_bar("tasks", df, skip=("Task", "Details", "Next e-mail", "id", "Repeat details", "Created"))
-        order = ["Done", "Status", "Task", "Details", "Created", "Work date", "Alert date", "Alert time", "Repeat", "Repeat details", "Next e-mail", "Remove"]
+        order = ["Done", "Status", "Created", "Task", "Details", "Work date", "Alert date", "Alert time", "Repeat", "Repeat details", "Next e-mail", "Remove"]
         cfg = {"id": None, "Done": st.column_config.CheckboxColumn("Done", width="small"),
                "Status": st.column_config.TextColumn("Status", width="medium"),
                "Task": st.column_config.TextColumn("Task subject"), "Created": st.column_config.TextColumn("Created (Dhaka)"),
@@ -1928,7 +1937,7 @@ def page_tasks():
 
             with st.form(f"task_edit_one_{pick}_{ev}", border=False):
                 st.text_input("Task subject", cur["title"], key=f"task_edit_title_{pick}_{ev}")
-                richnote.rich_note(init, key=nk, height=240)
+                richnote.rich_note(init, key=nk, height=320)
                 e1, e2 = st.columns(2)
                 e1.form_submit_button("👁 Preview e-mail", on_click=edit_pv_cb)
                 e2.form_submit_button("💾 Save this task", type="primary", on_click=edit_cb)
@@ -2049,10 +2058,13 @@ def page_cap_overview():
         c1, c2 = st.columns([1, 3])
         if c1.button("🔄 Read targets from Ringba now", key="ov_tg_sync"):
             try:
-                rc.set_deadline(120)
+                rc.set_deadline(240)
                 r = tg.run(force=True)
                 d = r["definitions"]
-                set_flash("flash_ov", "ok", f"Ringba has {d['in_ringba']} targets: {d['report']['with_daily_cap']} with a daily cap, {d['report']['with_monthly_cap']} with a monthly cap.")
+                msg = f"Ringba has {d['in_ringba']} targets: {d['report']['with_daily_cap']} with a daily cap, {d['report']['with_monthly_cap']} with a monthly cap."
+                if d.get("partial"):
+                    msg += f" {d['unchecked']} targets are still waiting; they are read on the next 5-minute run (or press the button again)."
+                set_flash("flash_ov", "ok", msg)
             except Exception as e:
                 set_flash("flash_ov", "err", f"Could not read targets: {e}")
             finally:
