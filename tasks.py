@@ -506,14 +506,23 @@ import re as _re
 from html import escape as _hesc
 from html.parser import HTMLParser as _HP
 
-_OK_TAGS = {"b", "strong", "i", "em", "u", "s", "strike", "ul", "ol", "li", "br", "p", "div", "span", "font"}
+_OK_TAGS = {"b", "strong", "i", "em", "u", "s", "strike", "ul", "ol", "li", "br", "p", "div", "span", "font", "h1", "h2", "h3", "a"}
 _VOID = {"br"}
 _COLOR = _re.compile(r"^(#[0-9a-fA-F]{3,8}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)|[a-zA-Z]{3,20})$")
+_PX = _re.compile(r"^(\d{1,3})(\.\d+)?px$")
+_TAGSTART = _re.compile(r"^\s*</?[a-zA-Z][^>]*>")
+_HEAD_STYLE = {"h1": "font-size:22px;margin:10px 0 6px", "h2": "font-size:18px;margin:8px 0 6px", "h3": "font-size:16px;margin:6px 0 4px"}
 MAX_NOTE = 20000
 
 
 def is_html(text):
-    return bool(_re.match(r"\s*<", str(text or "")))
+    """True when the note starts with an HTML tag (written by the rich editor). Old plain notes that merely start with '<' are not HTML."""
+    return bool(_TAGSTART.match(str(text or "")))
+
+
+def _safe_url(u):
+    u = str(u or "").strip()
+    return u if _re.match(r"^(https?://|mailto:)[^\s\"'<>]+$", u, _re.I) else ""
 
 
 def _safe_style(style):
@@ -522,20 +531,27 @@ def _safe_style(style):
         if ":" not in part:
             continue
         k, v = (x.strip() for x in part.split(":", 1))
-        k = k.lower()
+        k, vl = k.lower(), v.lower()
         if k in ("color", "background-color", "background") and _COLOR.match(v):
             keep.append(f"{'background-color' if k == 'background' else k}:{v}")
-        elif k == "font-weight" and v in ("bold", "700", "600", "800"):
+        elif k == "font-weight" and vl in ("bold", "700", "600", "800"):
             keep.append("font-weight:bold")
-        elif k == "font-style" and v == "italic":
+        elif k == "font-style" and vl == "italic":
             keep.append("font-style:italic")
-        elif k == "text-decoration" and v in ("underline", "line-through"):
-            keep.append(f"text-decoration:{v}")
+        elif k in ("text-decoration", "text-decoration-line") and vl and all(w in ("underline", "line-through") for w in vl.split()):
+            keep.append(f"text-decoration:{vl}")
+        elif k == "font-size" and _PX.match(vl) and 8 <= float(vl[:-2]) <= 72:
+            keep.append(f"font-size:{vl}")
+        elif k == "text-align" and vl in ("left", "center", "right", "justify"):
+            keep.append(f"text-align:{vl}")
+        elif k == "margin-left" and _PX.match(vl) and 0 <= float(vl[:-2]) <= 300:
+            keep.append(f"margin-left:{vl}")
     return ";".join(keep)
 
 
 class _Clean(_HP):
-    """Keeps only simple formatting tags, and only colour / bold / italic style. Scripts, links, images and events are dropped."""
+    """Keeps only simple formatting (bold, italic, underline, strike, colours, size, alignment, indent, lists, headings, http/mailto links).
+    Scripts, images, other attributes and event handlers are dropped."""
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.out, self.stack, self.skip = [], [], 0
@@ -549,10 +565,17 @@ class _Clean(_HP):
         a = dict(attrs)
         extra = ""
         st = _safe_style(a.get("style"))
+        if tag in _HEAD_STYLE:
+            st = (_HEAD_STYLE[tag] + (";" + st if st else ""))
         if st:
             extra += f' style="{_hesc(st, quote=True)}"'
         if tag == "font" and a.get("color") and _COLOR.match(a["color"].strip()):
             extra += f' color="{_hesc(a["color"].strip(), quote=True)}"'
+        if tag == "a":
+            href = _safe_url(a.get("href"))
+            if not href:
+                return                                  # a link without a safe address: keep the text only
+            extra = f' href="{_hesc(href, quote=True)}" style="color:#1a73e8;text-decoration:underline" target="_blank" rel="noopener noreferrer"'
         self.out.append(f"<{tag}{extra}>")
         if tag not in _VOID:
             self.stack.append(tag)
@@ -611,14 +634,22 @@ class _Text(_HP):
                 self.parts.append("\u2022 ")
         elif tag == "br":
             self.parts.append("\n")
-        elif tag in ("p", "div"):
+        elif tag in ("p", "div", "h1", "h2", "h3"):
             self._nl()
+        elif tag == "a":
+            self.href = _safe_url(dict(attrs).get("href"))
+            self.link_at = len(self.parts)
 
     def handle_endtag(self, tag):
+        if tag == "a" and getattr(self, "href", ""):
+            shown = "".join(self.parts[getattr(self, "link_at", len(self.parts)):]).strip()
+            if shown != self.href.replace("mailto:", ""):
+                self.parts.append(f" ({self.href.replace('mailto:', '')})")
+            self.href = ""
         if tag in ("ul", "ol") and self.lists:
             self.lists.pop()
             self._nl()
-        elif tag in ("p", "div", "li"):
+        elif tag in ("p", "div", "li", "h1", "h2", "h3"):
             self._nl()
 
     def handle_data(self, data):

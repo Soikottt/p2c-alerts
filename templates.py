@@ -196,8 +196,76 @@ def _fill_html(ctx, name):
     return _value_html(ctx[name]) if ctx and name in ctx else None
 
 
+
+
+# ---------------------------------------------------------------- rich (editor) templates
+# A template written with the formatting editor is stored as safe HTML. {placeholders} inside it are filled the same way.
+_HTML_START = re.compile(r"^\s*</?[a-zA-Z][^>]*>")
+_BRACE = re.compile(r"\{((?:\w|<[^>]+>)+?)\}")
+
+
+def is_rich(text):
+    return bool(_HTML_START.match(str(text or "")))
+
+
+def _balanced(tags):
+    stack = []
+    for t in tags:
+        name = re.match(r"</?\s*([a-zA-Z0-9]+)", t).group(1).lower()
+        if t.startswith("</"):
+            if not stack or stack.pop() != name:
+                return False
+        elif not t.endswith("/>") and name != "br":
+            stack.append(name)
+    return not stack
+
+
+def _fill_rich_html(body, ctx):
+    def sub(m):
+        inner = m.group(1)
+        tags = re.findall(r"<[^>]+>", inner)
+        name = re.sub(r"<[^>]+>", "", inner)
+        if not name:
+            return m.group(0)
+        val = _fill_html(ctx, name)
+        if val is None:
+            return m.group(0)
+        opens = "".join(t for t in tags if not t.startswith("</"))
+        closes = "".join(t for t in tags if t.startswith("</"))
+        return opens + val + closes
+    return _BRACE.sub(sub, body)
+
+
+def rich_to_html(text, ctx=None):
+    import tasks                                     # the safe-HTML cleaner lives there (imported late: tasks imports this module)
+    body = tasks.clean_html(text)
+    body = body.replace("<ul>", "<ul style='margin:4px 0 8px 22px;padding:0'>").replace("<ol>", "<ol style='margin:4px 0 8px 22px;padding:0'>")
+    body = _fill_rich_html(body, ctx)
+    return ('<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#222">' + body + "</div>")
+
+
+def rich_to_text(text, ctx=None):
+    import tasks
+    p = tasks._Text()
+    p.feed(tasks.clean_html(text))
+    p.close()
+    plain = "\n".join(x.rstrip() for x in "".join(p.parts).replace("\r", "").split("\n")).strip()
+    plain = re.sub(r"\n{3,}", "\n\n", plain)
+    return re.sub(r"\{(\w+)\}", lambda m: str(ctx[m.group(1)]) if ctx and m.group(1) in ctx else m.group(0), plain)
+
+
+def to_editor_html(text):
+    """What the editor opens with: a rich template as it is; an old typed template (with ** and - marks) turned into formatting."""
+    if is_rich(text):
+        return text
+    h = to_html(text, None)
+    m = re.match(r'^<div style="[^"]*">(.*)</div>$', h, re.S)
+    return m.group(1) if m else h
+
 def to_html(text, ctx=None):
     """The template as an HTML email body. {placeholders} are filled with HTML-escaped values."""
+    if is_rich(text):
+        return rich_to_html(text, ctx)
     out, para, stack = [], [], []          # stack = open lists: ["ul"|"ol", ...]
 
     def close_lists(to=0):
@@ -252,6 +320,8 @@ def to_html(text, ctx=None):
 
 def to_text(text, ctx=None):
     """The same template as clean plain text (for mail apps that do not show HTML, and for the Alert Log)."""
+    if is_rich(text):
+        return rich_to_text(text, ctx)
     out = []
     for raw in (text or "").replace("\r\n", "\n").split("\n"):
         line = raw.rstrip()

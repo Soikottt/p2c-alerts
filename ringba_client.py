@@ -799,38 +799,64 @@ def target_cap_debug(target_id):
     return out
 
 
-def fetch_targets(max_details=300):
-    """Every buyer target on the account with its daily / monthly cap. Returns (list, report)."""
+def _target_detail(headers, acct, rid, it):
+    """One target's full record -> parsed target, or None when it failed (the caller keeps the list version)."""
+    d = _json(_get(f"{BASE}/{acct}/targets/{rid}", headers), f"target {rid}")
+    if isinstance(d, dict) and isinstance(d.get("target"), dict):
+        d = d["target"]
+    return parse_target({**it, **d}) if isinstance(d, dict) else None
+
+
+def fetch_targets(max_details=300, skip_details=None, workers=6):
+    """Every buyer target on the account with its daily / monthly cap. Returns (list, report).
+    Targets whose list entry shows no cap are asked for in full, several at the same time. `skip_details` = ids already known to
+    have no cap (not asked again). When the time budget ends, the targets not yet checked are listed in report['unchecked'] and
+    report['partial'] is True: the caller must keep their old caps. Nothing is lost, the next run continues."""
+    from concurrent.futures import ThreadPoolExecutor
     headers = _auth_headers()
     acct = config.RINGBA_ACCOUNT_ID
     data = _json(_get(f"{BASE}/{acct}/targets", headers), "the targets list")
     items = extract_target_items(data)
-    out, details, bad = [], 0, 0
+    skip_details = set(skip_details or ())
+    parsed, bad = [], 0
     for it in items:
         t = parse_target(it)
         if t is None:
             bad += 1
             continue
-        if not (t["daily_cap"] or t["monthly_cap"]) and details < max_details:     # no cap seen in the list: ask for this target in full
-            details += 1
-            _nap(0.1)
-            try:
-                d = _json(_get(f"{BASE}/{acct}/targets/{t['rid']}", headers), f"target {t['rid']}")
-            except RingbaError as e:
-                if "ran out of time" in str(e):
-                    raise
-                # one target's full record failing must not stop the whole sync
-                out.append(t)
-                continue
-            if isinstance(d, dict) and isinstance(d.get("target"), dict):
-                d = d["target"]
-            full = parse_target({**it, **d}) if isinstance(d, dict) else None
-            t = full or t
-        out.append(t)
+        parsed.append((it, t))
+    todo = [(i, it, t) for i, (it, t) in enumerate(parsed) if not (t["daily_cap"] or t["monthly_cap"]) and t["rid"] not in skip_details]
+    todo = todo[:max_details]
+    out = [t for _, t in parsed]
+    unchecked, no_cap_checked, details = [], [], 0
+
+    def work(job):
+        i, it, t = job
+        try:
+            _check_time()
+            return job, _target_detail(headers, acct, t["rid"], it), None
+        except RingbaError as e:
+            return job, None, e
+        except Exception as e:                      # one odd record must not stop the sync
+            return job, None, e
+
+    if todo:
+        with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
+            for (i, it, t), full, err in ex.map(work, todo):
+                if err is not None:
+                    if isinstance(err, RingbaError) and "ran out of time" in str(err):
+                        unchecked.append(t["rid"])
+                    continue                        # failed once: keep the list version, try again next sync
+                details += 1
+                if full:
+                    out[i] = full
+                    t = full
+                if not (t["daily_cap"] or t["monthly_cap"]):
+                    no_cap_checked.append(t["rid"])
     keys = sorted({k for it in items if isinstance(it, dict) for k in it})[:40]
     report = {"count": len(items), "parsed": len(out), "invalid": bad, "detail_calls": details,
               "with_daily_cap": sum(1 for t in out if t["daily_cap"]), "with_monthly_cap": sum(1 for t in out if t["monthly_cap"]),
-              "first_item_keys": keys}
+              "first_item_keys": keys, "partial": bool(unchecked), "unchecked": unchecked, "no_cap_checked": no_cap_checked}
     if items and not out:
         raise RingbaError("Ringba returned targets but I could not find their id field. Fields it returned: " + ", ".join(keys))
     return out, report
