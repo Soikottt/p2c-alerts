@@ -114,6 +114,27 @@ def send_test(to_list, subject="Test email from your Pay-Per-Call alert tool"):
     smtp_send(to_list, [], subject, "If you can read this, your email setup works.\n")
 
 
+def _drop_for_retired_dids(rows, res):
+    """Last look before sending: a DID alert (inactive / new-no-calls, including its reminders and follow-ups) for a DID that has been
+    retired, deleted or set to 'never alert' in the meantime is cancelled, not sent. The alert record is kept for the reports."""
+    ids = {}
+    for a in rows:
+        k = str(a.get("snooze_key") or "")
+        if a["alert_type"] in ("did_inactive", "did_new_no_calls") and k.startswith("did:") and k[4:].isdigit():
+            ids[a["id"]] = int(k[4:])
+    if not ids:
+        return rows
+    ok = {r["id"] for r in db.q_in("SELECT id FROM dids WHERE id IN :i AND status = 'active' AND never_alert = FALSE", "i", sorted(set(ids.values())))}
+    keep = []
+    for a in rows:
+        if a["id"] in ids and ids[a["id"]] not in ok:
+            db.x("UPDATE alerts SET status='skipped', last_error='Cancelled before sending: the DID is retired, deleted or set to never alert' WHERE id=:i", i=a["id"])
+            res["cancelled"] = res.get("cancelled", 0) + 1
+        else:
+            keep.append(a)
+    return keep
+
+
 def process_outbox(limit=25, max_seconds=None):
     """Send pending alerts (oldest first), at most `limit` per run and within `max_seconds`. The rest waits for the next run."""
     res = {"sent": 0, "dry_run": 0, "failed": 0, "waiting": 0, "left": 0}
@@ -122,6 +143,7 @@ def process_outbox(limit=25, max_seconds=None):
     total = db.q1("SELECT COUNT(*) AS n FROM alerts WHERE status='pending'")["n"]
     res["left"] = max(total - len(rows), 0)
     dry = is_dry_run()
+    rows = _drop_for_retired_dids(rows, res)
     session = Session()
     try:
         for idx, a in enumerate(rows):

@@ -171,6 +171,39 @@ def sync_from_ringba(retire=None):
     return res
 
 
+def check_live_status(now=None, max_age_minutes=5):
+    """Ask Ringba RIGHT NOW which numbers still exist and retire the ones that are gone (or bring back auto-retired ones that returned).
+    Used before a follow-up / reminder email is made, so a DID that was deleted or released in Ringba a minute ago gets NO email.
+    Only the number list is read (one request); skipped when the list was read less than `max_age_minutes` ago.
+    Returns {'checked': bool, 'retired': n, 'error': text or None}."""
+    now = now or db.now_utc()
+    res = {"checked": False, "retired": 0, "error": None}
+    if str(db.get_setting("numbers_auto_retire", "true")).lower() != "true":
+        return res                                            # the owner switched automatic retiring off
+    for key in ("numbers_live_checked_at", "numbers_last_ok"):
+        v = db.get_setting(key, "")
+        if v:
+            try:
+                if now - db.to_dt(v) < timedelta(minutes=max_age_minutes):
+                    return res                                # fresh enough
+            except Exception:
+                pass
+    try:
+        items, _ = rc.fetch_numbers()
+    except Exception as e:
+        res["error"] = str(e)[:200]
+        return res
+    if not items:
+        return res                                            # an empty answer is not trusted
+    seen = {i["number"] for i in items}
+    _reactivate(seen)
+    res["retired"], skipped = _retire_missing(seen)
+    res["checked"] = not skipped
+    if res["checked"]:
+        db.set_setting("numbers_live_checked_at", now.isoformat())
+    return res
+
+
 def sync_if_due(now=None, force=False):
     """Called by the 5-minute engine. Runs at most once per 'numbers_sync_minutes'. Returns stats, or None if not due."""
     now = now or db.now_utc()

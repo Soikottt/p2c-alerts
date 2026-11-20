@@ -227,6 +227,37 @@ def rule_target_caps(now):
     return made
 
 
+def cancel_pending_for_inactive_dids(alert_type):
+    """Emails of this type that are still waiting to be sent, for a DID that is retired / deleted / 'never alert': cancelled.
+    The alert record stays (status 'skipped', with the reason) so reports and history are kept."""
+    return db.x("UPDATE alerts SET status='skipped', last_error='Cancelled: the DID is retired, deleted or set to never alert' "
+                "WHERE status='pending' AND alert_type=:t AND snooze_key IN "
+                "(SELECT 'did:' || CAST(id AS TEXT) FROM dids WHERE status <> 'active' OR never_alert = TRUE)", t=alert_type)
+
+
+_live = {"done": False}
+
+
+def did_still_needs_follow_up(d, now, why=""):
+    """Last check before a FOLLOW-UP or REMINDER email is made for DID `d`: ask Ringba (at most every 5 minutes) whether the number still
+    exists, then read the DID's status again. False = the DID was retired / deleted / set to never alert, so no email is sent."""
+    import dids as didtools
+    if not _live["done"]:
+        _live["done"] = True
+        rc_mod = None
+        try:
+            import ringba_client as rc_mod
+            rc_mod.set_deadline(25)
+            didtools.check_live_status(now)
+        except Exception:
+            pass                                     # Ringba not reachable: the status saved by the hourly sync is used
+        finally:
+            if rc_mod is not None:
+                rc_mod.set_deadline(None)
+    cur = db.q1("SELECT status, never_alert FROM dids WHERE id=:i", i=d["id"])
+    return bool(cur and cur["status"] == "active" and not cur["never_alert"])
+
+
 def rule_inactive_dids(now):
     """One alert per DID per idle period. If nobody answers, it is repeated as a REMINDER every `did_reminder_days`
     days (at most `did_reminder_max` times). If somebody clicked 'wait N days', a FOLLOW-UP goes out when the pause ends.
@@ -237,9 +268,8 @@ def rule_inactive_dids(now):
     days = int(rule["param_days"] or 30)
     remind_days = max(int(float(db.get_setting("did_reminder_days", "3") or 0)), 0)
     remind_max = max(int(float(db.get_setting("did_reminder_max", "3") or 0)), 0)
-    # a DID that became 'never alert' must not send an email that was still waiting in the queue
-    db.x("UPDATE alerts SET status='skipped' WHERE status='pending' AND alert_type='did_inactive' AND snooze_key IN "
-         "(SELECT 'did:' || CAST(id AS TEXT) FROM dids WHERE never_alert = TRUE)")
+    # a DID that became 'never alert' or was retired / deleted must not send an email that was still waiting in the queue
+    cancel_pending_for_inactive_dids("did_inactive")
     idle_dids = []
     for d in db.q("SELECT * FROM dids WHERE status = 'active' AND COALESCE(never_alert, FALSE) = FALSE"):
         ref = to_dt(d["last_call_at"]) or to_dt(d["added_at"])
@@ -312,6 +342,11 @@ def rule_inactive_dids(now):
                 key, tag, reminders_sent = f"{base}:f{last['id']}", "FOLLOW-UP (pause ended): ", 0
             else:
                 continue                                    # answered / being handled by the team
+        if tag and not did_still_needs_follow_up(d, now):          # a follow-up / reminder: check Ringba first
+            alerts.create_alert("did_inactive", f"{key}:cancelled", status="skipped", subject="(follow-up cancelled: DID retired)",
+                                body="This follow-up was cancelled because the DID was deleted / retired in Ringba before it was sent.",
+                                publisher_id=d["publisher_id"], snooze_key=f"did:{d['id']}")
+            continue
         ctx = make_ctx(d, idle, cycle, reminders_sent)
         if alerts.create_alert("did_inactive", key, ctx, publisher_id=d["publisher_id"], snooze_key=f"did:{d['id']}",
                                subject_tag=tag):
@@ -333,18 +368,21 @@ def rule_new_dids_no_calls(now):
     if window > 0:
         sql += " AND d.added_at >= :since"
         p["since"] = now - timedelta(days=window)
-    db.x("UPDATE alerts SET status='skipped' WHERE status='pending' AND alert_type='did_new_no_calls' AND snooze_key IN "
-         "(SELECT 'did:' || CAST(id AS TEXT) FROM dids WHERE never_alert = TRUE OR last_call_at IS NOT NULL)")
+    cancel_pending_for_inactive_dids("did_new_no_calls")
+    db.x("UPDATE alerts SET status='skipped', last_error='DID got its first call: nothing to follow up' WHERE status='pending' AND alert_type='did_new_no_calls' AND snooze_key IN "
+         "(SELECT 'did:' || CAST(id AS TEXT) FROM dids WHERE last_call_at IS NOT NULL)")
     cands = [(d, to_dt(d["added_at"])) for d in db.q(sql, **p)]
     cands = [(d, a) for d, a in cands if a and (now - a) >= timedelta(days=every)]
     if not cands:
         return 0
     last = {}      # did id -> (number of alerts so far, time of the newest, is it still waiting to be sent)
-    for a in db.q("SELECT dedupe_key, status, created_at, sent_at FROM alerts WHERE alert_type='did_new_no_calls' "
+    handled = set()   # DIDs whose newest alert the team closed ('done' / 'no action'): no more repeat alerts
+    for a in db.q("SELECT dedupe_key, status, created_at, sent_at, case_status FROM alerts WHERE alert_type='did_new_no_calls' "
                   "AND status <> 'skipped' AND dedupe_key LIKE 'newdid:%' ORDER BY id"):
         did = a["dedupe_key"].split(":")[1]
         n = last.get(did, (0,))[0] + 1
         last[did] = (n, to_dt(a["sent_at"] or a["created_at"]), a["status"] == "pending")
+        (handled.add if (a["case_status"] or "open") in ("done", "no_action") else handled.discard)(did)
     snoozes = {r["entity_key"]: to_dt(r["snooze_until"]) for r in db.q("SELECT entity_key, snooze_until FROM snoozes WHERE entity_key LIKE 'did:%'")}
     import dids as didtools
     pub = {x["id"]: x["name"] for x in db.q("SELECT id, name FROM publishers")}
@@ -352,12 +390,18 @@ def rule_new_dids_no_calls(now):
     made = 0
     for d, added in cands:
         n, when, waiting = last.get(str(d["id"]), (0, None, False))
-        if waiting:
+        if waiting or str(d["id"]) in handled:
             continue
         until = snoozes.get(f"did:{d['id']}")
         if until and until > now:
             continue                                   # paused (maybe the DID owner asked for time)
         if when and now - when < timedelta(days=every):
+            continue
+        if n and not did_still_needs_follow_up(d, now):          # a repeat alert: check Ringba first
+            alerts.create_alert("did_new_no_calls", f"newdid:{d['id']}:{n + 1}:cancelled", status="skipped",
+                                subject="(follow-up cancelled: DID retired)", snooze_key=f"did:{d['id']}",
+                                body="This follow-up was cancelled because the DID was deleted / retired in Ringba before it was sent.",
+                                publisher_id=d["publisher_id"])
             continue
         ctx = {"did": d["number"], "label": d["label"] or "", "label_part": f" ({d['label']})" if d["label"] else "",
                "age_days": (now - added).days, "added": fmt(d["added_at"]), "alert_number": n + 1, "repeat_days": every,
@@ -386,6 +430,7 @@ def run_all(now=None, log=None, max_new=None, seconds=None):
     import time
     now = now or db.now_utc()
     out = {}
+    _live["done"] = False                              # the live Ringba check for follow-ups runs at most once per run
     alerts.set_budget(max_new, seconds)
     try:
         for name, fn in [("publishers", rule_new_and_lapsed_publisher), ("watchlist", rule_watchlist_buyer),

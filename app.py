@@ -2123,13 +2123,85 @@ def page_cap_overview():
                     "monthly_cap_total": "Monthly cap (total)", "used_month": "Used this month", "month_pct": prog("Month %")})
 
 
+def page_followups():
+    """Upcoming DID follow-ups: which DID will get another email, when, and which ones the engine will skip."""
+    import followups
+    now = db.now_utc()
+    st.caption("Every DID alert that will send **another email** (a 3-day reminder when nobody answered, or a follow-up when a 'wait N days' pause ends, "
+               "or a repeat alert for a new DID without calls). Before each of these emails the engine checks Ringba: a DID that was deleted or retired "
+               "gets **no email**. Nothing is ever deleted here: answers and history stay.")
+    try:
+        rows = followups.upcoming(now)
+    except Exception as e:
+        st.error(f"Could not build the report: {e}")
+        return
+    will = [r for r in rows if r["will_send"] == "Yes"]
+    skip = [r for r in rows if r["will_send"].startswith("No")]
+    due = [r for r in will if r["next_followup"] and r["next_followup"] <= now + timedelta(days=1)]
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Follow-ups scheduled", len(will))
+    k2.metric("Due in the next 24 hours", len(due))
+    k3.metric("Will be SKIPPED (DID retired)", len(skip), help="These DIDs were retired or deleted: no email will be sent")
+    k4.metric("Last live check of Ringba", ago(db.get_setting("numbers_live_checked_at") or db.get_setting("numbers_last_ok")) if (db.get_setting("numbers_live_checked_at") or db.get_setting("numbers_last_ok")) else "never")
+    up_tab, hist_tab = st.tabs(["📅 Upcoming follow-ups", "🕘 Previous follow-ups"])
+    with up_tab:
+        show_skip = st.checkbox("Also show DIDs that will be skipped (retired / never alert)", value=True, key="fu_skip")
+        shown = rows if show_skip else will
+        if not shown:
+            st.info("No follow-up is scheduled right now.")
+        else:
+            recs = [{"next_email": fmt(r["next_followup"]) if r["next_followup"] else "", "will_send": r["will_send"], "did": r["did"], "label": r["label"],
+                     "publisher": r["publisher"], "campaign": r["campaign"], "type": r["kind"], "what_happens": r["why"],
+                     "previous_response": r["previous_response"], "answered_by": r["responded_by"],
+                     "answered_at": fmt(r["responded_at"]) if r["responded_at"] else "", "note": r["response_note"],
+                     "paused_days": r["snoozed_days"], "last_email": fmt(r["last_email"]) if r["last_email"] else "",
+                     "followups_sent": r["followups_sent"], "did_status": r["did_status"]} for r in shown]
+            df = pd.DataFrame(recs)
+            show_df("followups", df, column_config={
+                "next_email": "Next email", "will_send": "Will it be sent?", "did": "DID", "label": "Label", "publisher": "Publisher", "campaign": "Campaign",
+                "type": "Alert type", "what_happens": "What happens", "previous_response": "AM's previous response", "answered_by": "Answered by",
+                "answered_at": "Answered at", "note": "AM's note", "paused_days": st.column_config.NumberColumn("Paused for (days)", help="How many days the previous answer paused this DID"),
+                "last_email": "Last email sent", "followups_sent": st.column_config.NumberColumn("Follow-ups so far", help="Reminders / follow-ups already sent for this idle period"),
+                "did_status": "Current DID status"})
+            st.markdown("**Preview of the next email**")
+            labels = [f"{r['did']}  {('(' + r['label'] + ') ') if r['label'] else ''}- {fmt(r['next_followup']) if r['next_followup'] else ''}" for r in shown]
+            pick = st.selectbox("Choose a DID", range(len(shown)), format_func=lambda i: labels[i], key="fu_pick")
+            row = shown[pick]
+            if not row["will_send"] == "Yes":
+                st.warning(f"This email will NOT be sent: {row['will_send'][5:] if row['will_send'].startswith('No - ') else row['will_send']}.")
+            try:
+                subject, text, html = followups.preview(row, now)
+                st.markdown(f"**Subject:** {subject}")
+                st.markdown(html, unsafe_allow_html=True)
+                with st.expander("Plain-text version"):
+                    st.text(text)
+                st.caption("The preview uses today's data. The real email is made when it is due, with the numbers of that day.")
+            except Exception as e:
+                st.error(f"Could not build the preview: {e}")
+    with hist_tab:
+        try:
+            hist = followups.history()
+        except Exception as e:
+            hist, _e = [], e
+            st.error(f"Could not read the history: {e}")
+        if not hist:
+            st.info("No reminder or follow-up has been made yet.")
+        else:
+            hdf = pd.DataFrame([{"when": fmt(r["when"]), "kind": r["kind"], "did": r["did"], "label": r["label"], "publisher": r["publisher"],
+                                 "email": r["email_status"], "response": r["response"], "team_status": cases.label(r["case"]), "did_now": r["did_now"],
+                                 "note": r["note"]} for r in hist])
+            show_df("followups_hist", hdf, column_config={"when": "When", "kind": "What", "did": "DID", "label": "Label", "publisher": "Publisher",
+                                                            "email": "Email status", "response": "AM's response", "team_status": "Team status",
+                                                            "did_now": "DID status now", "note": "Note"})
+
+
 def tasks_tz_now():
     """Current time in the tasks time zone (Dhaka by default), AM/PM, for the 'Page loaded' line."""
     import tasks
     return tasks.local_now().strftime("%a %d %b %Y, %I:%M:%S %p") + f" ({db.get_setting('tasks_timezone', 'Asia/Dhaka')})"
 
 
-PAGES = {"📊 Dashboard": page_dashboard, "🎛️ Cap overview": page_cap_overview, "📑 Reports": page_reports, "🧑‍💼 Publishers": page_publishers,
+PAGES = {"📊 Dashboard": page_dashboard, "🎛️ Cap overview": page_cap_overview, "📅 Follow-ups": page_followups, "📑 Reports": page_reports, "🧑‍💼 Publishers": page_publishers,
          "🏢 Buyers": page_buyers, "📞 DIDs": page_dids, "🚦 Caps": page_caps, "✅ My Tasks": page_tasks, "✉️ Emails": page_emails,
          "📝 Email templates": page_templates, "📜 Alert Log": page_log, "🔄 Sync & Import": page_sync,
          "⚙️ Settings": page_settings}
