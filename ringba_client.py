@@ -756,7 +756,16 @@ def find_caps(obj, _depth=0, _path=""):
                 seen.extend(s2)
                 if not ("cap" in kl and not any(x in kl for x in _CAP_SKIP[:3])):
                     continue
-            if _LIMITISH.search(kl) and not any(x in kl for x in _CAP_SKIP[:6]) and not isinstance(v, (dict, list)):
+            if isinstance(v, list) and "dayofweek" in kl.replace("_", "") and "cap" in kl and "sum" not in kl and len(v) == 7:
+                # Ringba's "Daily Cap" with the ADVANCED button: one number per weekday (Sunday first). Today's number is the cap.
+                from datetime import datetime
+                from zoneinfo import ZoneInfo
+                idx = (datetime.now(ZoneInfo("America/New_York")).weekday() + 1) % 7
+                n = cap_value(v[idx])
+                seen.append((path, v))
+                if n:
+                    found.setdefault("daily", n)
+            elif _LIMITISH.search(kl) and not any(x in kl for x in _CAP_SKIP[:6]) and not isinstance(v, (dict, list)):
                 n = cap_value(v)
                 seen.append((path, v))
                 if n:

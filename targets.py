@@ -36,14 +36,14 @@ def sync_definitions(now=None):
     now = now or db.now_utc()
     import json
     try:
-        nocap = json.loads(db.get_setting("targets_nocap_cache_v2", "") or "{}")
+        nocap = json.loads(db.get_setting("targets_nocap_cache_v3", "") or "{}")
     except ValueError:
         nocap = {}
     nocap = {k: v for k, v in nocap.items() if v and db.to_dt(v) > now - timedelta(hours=NOCAP_HOURS)}     # "checked, no cap" is trusted for a day
     items, report = rc.fetch_targets(skip_details=set(nocap))
     for rid in report.get("no_cap_checked", []):
         nocap[rid] = now.isoformat()
-    db.set_setting("targets_nocap_cache_v2", json.dumps(nocap))
+    db.set_setting("targets_nocap_cache_v3", json.dumps(nocap))
     unchecked = set(report.get("unchecked", []))
     by_rid, by_name = _buyer_lookup()
     from_calls = None
