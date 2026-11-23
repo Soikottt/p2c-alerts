@@ -136,7 +136,9 @@ CREATE TABLE IF NOT EXISTS alerts (
   response_note TEXT,
   case_status TEXT DEFAULT 'open',
   case_updated_at TIMESTAMPTZ,
-  thread_id INTEGER
+  thread_id INTEGER,
+  claimed_at TIMESTAMPTZ,
+  sent_to TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_alerts_status ON alerts (status);
 CREATE INDEX IF NOT EXISTS ix_alerts_created ON alerts (created_at);
@@ -226,10 +228,12 @@ CREATE TABLE IF NOT EXISTS targets (
   active BOOLEAN NOT NULL DEFAULT TRUE,
   daily_cap INTEGER,
   monthly_cap INTEGER,
+  all_time_cap INTEGER,
   alerts_on BOOLEAN NOT NULL DEFAULT TRUE,
   thresholds TEXT NOT NULL DEFAULT '80,100',
   count_day INTEGER,
   count_month INTEGER,
+  count_total INTEGER,
   counts_at TIMESTAMPTZ,
   synced_at TIMESTAMPTZ
 );

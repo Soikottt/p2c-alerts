@@ -463,12 +463,13 @@ def page_dashboard():
             out.append({"Type": c["entity_type"], "Name": u["name"], "Period": c["period"], "Counts": c["metric"],
                         "Used": u["usage"], "Cap": c["cap_value"], "Percent": round(u["pct"], 1)})
         show_df("dash_caps", pd.DataFrame(out).sort_values("Percent", ascending=False))
-    tg_rows = db.q("SELECT * FROM targets WHERE active = TRUE AND (daily_cap IS NOT NULL OR monthly_cap IS NOT NULL) AND counts_at IS NOT NULL")
+    tg_rows = db.q("SELECT * FROM targets WHERE active = TRUE AND (daily_cap IS NOT NULL OR monthly_cap IS NOT NULL OR all_time_cap IS NOT NULL) AND counts_at IS NOT NULL")
     if tg_rows:
         st.subheader("Buyer target caps right now (from Ringba)")
         out = []
         for t in tg_rows:
-            for per, cap, used in (("daily", t["daily_cap"], t["count_day"]), ("monthly", t["monthly_cap"], t["count_month"])):
+            for per, cap, used in (("daily", t["daily_cap"], t["count_day"]), ("monthly", t["monthly_cap"], t["count_month"]),
+                                   ("global", t.get("all_time_cap"), t.get("count_total"))):
                 if cap:
                     out.append({"Buyer": t["buyer_name"] or "", "Target": t["name"], "Period": per, "Used": used or 0, "Cap": cap,
                                 "Percent": round((used or 0) / cap * 100, 1)})
@@ -1072,7 +1073,7 @@ def targets_section():
             r = tg.run(force=True)
             d, u = r["definitions"], r["usage"]
             msg = (f"Ringba has {d['in_ringba']} targets: {d['report']['with_daily_cap']} with a daily cap, "
-                   f"{d['report']['with_monthly_cap']} with a monthly cap. Usage read for {u['polled']} of {u['total']}.")
+                   f"{d['report']['with_monthly_cap']} with a monthly cap, {d['report'].get('with_global_cap', 0)} with a global cap. Usage read for {u['polled']} of {u['total']}.")
             if d.get("partial"):
                 msg += (f" {d['unchecked']} targets are still waiting (Ringba is slow right now). Nothing was lost: they are read automatically "
                         "on the next 5-minute run, or press the button again.")
@@ -1083,7 +1084,7 @@ def targets_section():
             rc.set_deadline(None)
         st.rerun()
     c2.caption((f"Last successful read: {ago(ok_t)}. " if ok_t else "Not read yet. ") + (f"Last problem: {err}" if err else ""))
-    rows = db.q("SELECT * FROM targets WHERE active = TRUE AND (daily_cap IS NOT NULL OR monthly_cap IS NOT NULL) ORDER BY buyer_name, name")
+    rows = db.q("SELECT * FROM targets WHERE active = TRUE AND (daily_cap IS NOT NULL OR monthly_cap IS NOT NULL OR all_time_cap IS NOT NULL) ORDER BY buyer_name, name")
     if not rows:
         st.info("No target with a cap yet. Press the button above (Ringba must have a daily or monthly cap on the target).")
         return
@@ -1091,11 +1092,13 @@ def targets_section():
     for r in rows:
         dp = round((r["count_day"] or 0) / r["daily_cap"] * 100, 1) if r["daily_cap"] else None
         mp = round((r["count_month"] or 0) / r["monthly_cap"] * 100, 1) if r["monthly_cap"] else None
+        gp = round((r.get("count_total") or 0) / r["all_time_cap"] * 100, 1) if r.get("all_time_cap") else None
         recs.append({"id": r["id"], "buyer": r["buyer_name"] or "", "target": r["name"],
                      "daily_cap": r["daily_cap"], "used_today": r["count_day"] if r["daily_cap"] else None, "today_pct": dp,
                      "monthly_cap": r["monthly_cap"], "used_month": r["count_month"] if r["monthly_cap"] else None, "month_pct": mp,
+                     "global_cap": r.get("all_time_cap"), "used_global": r.get("count_total") if r.get("all_time_cap") else None, "global_pct": gp,
                      "alerts_on": bool(r["alerts_on"]), "thresholds": r["thresholds"], "usage_read": ago(r["counts_at"]) if r["counts_at"] else "never"})
-    cols = ["id", "buyer", "target", "daily_cap", "used_today", "today_pct", "monthly_cap", "used_month", "month_pct", "alerts_on", "thresholds", "usage_read"]
+    cols = ["id", "buyer", "target", "daily_cap", "used_today", "today_pct", "monthly_cap", "used_month", "month_pct", "global_cap", "used_global", "global_pct", "alerts_on", "thresholds", "usage_read"]
     df = frame(recs, cols)
     df["alerts_on"] = df["alerts_on"].astype(bool)
 
@@ -1106,11 +1109,13 @@ def targets_section():
            "daily_cap": st.column_config.NumberColumn("Daily cap"), "used_today": st.column_config.NumberColumn("Used today"),
            "today_pct": st.column_config.NumberColumn("Today %"), "monthly_cap": st.column_config.NumberColumn("Monthly cap"),
            "used_month": st.column_config.NumberColumn("Used this month"), "month_pct": st.column_config.NumberColumn("Month %"),
+           "global_cap": st.column_config.NumberColumn("Global cap", help="Ringba 'Global Call Cap': the cap on the whole target for ever"),
+           "used_global": st.column_config.NumberColumn("Used (global)"), "global_pct": st.column_config.NumberColumn("Global %"),
            "alerts_on": st.column_config.CheckboxColumn("Send alerts", help="Untick to stop alerts for this target."),
-           "thresholds": st.column_config.TextColumn("Alert at % (comma-separated)", help="Example: 80,100. Applies to the daily and the monthly cap."),
+           "thresholds": st.column_config.TextColumn("Alert at % (comma-separated)", help="Example: 80,100. Applies to the daily, the monthly and the global cap."),
            "usage_read": st.column_config.TextColumn("Usage read")}
     table_editor("targets", df, cfg, ["alerts_on", "thresholds"], "targets", tf, dynamic=False,
-                 disabled=["buyer", "target", "daily_cap", "used_today", "today_pct", "monthly_cap", "used_month", "month_pct", "usage_read"])
+                 disabled=["buyer", "target", "daily_cap", "used_today", "today_pct", "monthly_cap", "used_month", "month_pct", "global_cap", "used_global", "global_pct", "usage_read"])
 
 
 def page_caps():
@@ -1360,6 +1365,29 @@ def page_templates():
 
 
 # ================================================================== ALERT LOG
+def show_thread_history(aid, key):
+    """The whole e-mail conversation of an alert code: every alert / follow-up that was sent, every answer, reply and team note."""
+    import chain as chainlib
+    a0 = db.q1("SELECT id FROM alerts WHERE id=:i", i=int(aid))
+    if not a0:
+        st.warning(f"No alert with the code #A{aid} was found.")
+        return None
+    root, ids = chainlib.family_ids(aid)
+    al = db.q_in("SELECT id, alert_type, dedupe_key, subject, status, created_at, sent_at, to_emails, cc_emails, body, thread_id FROM alerts WHERE id IN :i ORDER BY id", "i", ids)
+    mails = [a for a in al if a["alert_type"] != "alert_response" and not str(a["dedupe_key"]).endswith(":cancelled")]
+    st.markdown(f"#### 🧵 Conversation **#A{root}** - {len(mails)} email(s) in this thread")
+    ev = chainlib.thread_events(ids)
+    if ev:
+        df = pd.DataFrame([{"when": fmt(e["when"]), "what": e["kind"], "who": e["who"], "details": e["text"], "email_code": f"#A{e['alert_id']}"} for e in ev])
+        show_df(f"thread_{key}", df, column_config={"when": "When", "what": "What happened", "who": "Who", "details": st.column_config.TextColumn("Details", width="large"),
+                                                      "email_code": st.column_config.TextColumn("Email id", help="The id of the single email in the Alert Log")})
+    st.caption("All emails of this conversation use the same subject and the same code, so Gmail / Outlook show them as one thread.")
+    for a in mails:
+        with st.expander(f"{chainlib.kind_of(a)} - #A{a['id']} - {fmt(a['sent_at'] or a['created_at'])} - {a['status']}"):
+            st.text(f"To: {a['to_emails']}\nCC: {a['cc_emails']}\nSubject: {a['subject']}\n\n{a['body']}")
+    return set(ids)
+
+
 def log_state(r, has_buttons):
     """(group, label) for one alert row, so you can see at a glance what needs you."""
     s, c = r["status"], (r["case_status"] or "open")
@@ -1375,6 +1403,16 @@ def log_state(r, has_buttons):
             "in_progress": ("wait", "🔧 IN PROGRESS"), "waiting": ("wait", "🟡 WAITING for publisher / AM"),
             "done": ("done", "🟢 DONE"), "no_action": ("done", "🟢 NO ACTION NEEDED")}.get(
         c, ("wait", "🟡 WAITING for an answer") if has_buttons else ("info", "⚪ INFO only"))
+
+
+def chainlib_parse(text):
+    import chain
+    return chain.parse_code(text)
+
+
+def chainlib_kind(row):
+    import chain
+    return chain.kind_of(row)
 
 
 def page_log():
@@ -1395,15 +1433,26 @@ def page_log():
     if st.session_state.get("backup_zip"):
         fname, data = st.session_state["backup_zip"]
         c4.download_button("⬇️ Download " + fname, data, fname, "application/zip", key="dl_backup")
+    code_q = st.text_input("🔎 Search / open an alert by its code (for example #A306)", key="log_code",
+                           help="Shows the whole history of that code: the first alert, every follow-up, every answer, reply and note.")
+    code_ids = None
+    if (code_q or "").strip():
+        cid = chainlib_parse(code_q)
+        if cid:
+            code_ids = show_thread_history(cid, "code")
+        else:
+            st.warning("Type a code like #A306 or just the number 306.")
     with st.expander("More filters (e-mail status, team status)"):
         f1, f2 = st.columns(2)
         show = f1.multiselect("Show status", ["pending", "sent", "dry_run", "failed", "skipped"], default=["pending", "sent", "dry_run", "failed"])
         case_f = f2.multiselect("Team status", cases.STATUSES, default=cases.STATUSES, format_func=cases.label)
     if show and case_f:
-        rows = db.q_in("SELECT id, created_at, alert_type, subject, to_emails, cc_emails, status, attempts, last_error, case_status, "
+        rows = db.q_in("SELECT id, created_at, alert_type, dedupe_key, thread_id, subject, to_emails, cc_emails, status, attempts, last_error, case_status, "
                        "response_label, response_note, responded_by, responded_at FROM alerts WHERE status IN :s ORDER BY id DESC LIMIT 400",
                        "s", show)
         rows = [r for r in rows if (r["case_status"] or "open") in case_f]
+        if code_ids is not None:
+            rows = [r for r in rows if r["id"] in code_ids]
         if not rows:
             st.info("Nothing to show.")
         else:
@@ -1427,13 +1476,22 @@ def page_log():
                 last_note[n["alert_id"]] = f"{n['text']}  - {who_} ({n['source']})"
                 if n["source"] == "email":
                     replied_by[n["alert_id"]] = who_
-            recs = [{"state": r["_state"], "id": r["id"], "created": fmt(r["created_at"]), "type": r["alert_type"], "subject": r["subject"],
+            # a "Manager response" row is only a notice that somebody answered: show WHAT was answered, and the manager's note only when there is one
+            resp_ids = [int(str(r["dedupe_key"]).split(":")[1]) for r in rows if r["alert_type"] == "alert_response" and str(r["dedupe_key"]).startswith("resp")
+                        and str(r["dedupe_key"]).split(":")[1].isdigit()]
+            parents = {p["id"]: p for p in db.q_in("SELECT id, response_label, response_note, responded_by FROM alerts WHERE id IN :i", "i", resp_ids)} if resp_ids else {}
+            def _resp_parent(r):
+                k = str(r["dedupe_key"]).split(":")
+                return parents.get(int(k[1])) if r["alert_type"] == "alert_response" and k[0].startswith("resp") and len(k) > 1 and k[1].isdigit() else None
+            recs = [{"state": r["_state"], "id": r["id"], "code": f"#A{r['thread_id'] or r['id']}", "created": fmt(r["created_at"]),
+                     "type": (chainlib_kind(r) + (" - email reply" if str(r["dedupe_key"]).startswith("resp-mail") else "")), "subject": r["subject"],
                      "team_status": cases.label(r["case_status"]),
-                     "am_answer": (f"{r['response_label']} - {r['responded_by'] or 'name not given'}" if r["response_label"] else ""),
-                     "note_for_team": r["response_note"] or "", "latest_note": last_note.get(r["id"], ""), "add_note": "",
+                     "am_answer": (f"{r['response_label']} - {r['responded_by'] or 'name not given'}" if r["response_label"]
+                                   else (f"{_resp_parent(r)['response_label']} - {_resp_parent(r)['responded_by'] or 'name not given'}" if _resp_parent(r) and _resp_parent(r)["response_label"] else "")),
+                     "note_for_team": (r["response_note"] or (_resp_parent(r) or {}).get("response_note") or "") if r["alert_type"] != "alert_response" else ((_resp_parent(r) or {}).get("response_note") or ""), "latest_note": last_note.get(r["id"], ""), "add_note": "",
                      "answered_by": r["responded_by"] or (f"(email reply) {replied_by[r['id']]}" if r["id"] in replied_by else ""), "answered_at": fmt(r["responded_at"]) if r["responded_at"] else "",
                      "sent": r["status"], "to": r["to_emails"], "cc": r["cc_emails"], "error": r["last_error"] or "", "_cat": r["_cat"]} for r in rows]
-            cols = ["state", "id", "created", "type", "subject", "team_status", "am_answer", "note_for_team", "latest_note", "add_note",
+            cols = ["state", "id", "code", "created", "type", "subject", "team_status", "am_answer", "note_for_team", "latest_note", "add_note",
                     "answered_by", "answered_at", "sent", "to", "cc", "error", "_cat"]
             df = frame(recs, cols)
             df, fsig = filter_bar("alertlog_f", df, skip=("subject", "note_for_team", "latest_note", "add_note", "answered_at", "to", "cc", "error", "state", "am_answer"))
@@ -1445,7 +1503,9 @@ def page_log():
             ver = st.session_state.get("logver", 0)
             cfg = {"_cat": None, "state": st.column_config.TextColumn("State", width="medium", help="What to do with this alert"),
                    "id": st.column_config.NumberColumn("#", width="small"),
-                   "created": st.column_config.TextColumn("Created"), "type": st.column_config.TextColumn("Alert type"),
+                   "code": st.column_config.TextColumn("Code", help="The [#A..] code of the e-mail conversation. Follow-ups keep the code of the first alert."),
+                   "created": st.column_config.TextColumn("Created"),
+                   "type": st.column_config.TextColumn("What is this", help="New alert / Follow-up email / Manager response"),
                    "subject": st.column_config.TextColumn("Subject", width="large"),
                    "team_status": st.column_config.SelectboxColumn("Team status", options=[cases.STATUS_LABEL[s] for s in cases.STATUSES], width="medium"),
                    "am_answer": st.column_config.TextColumn("AM answer (button)"),
@@ -1495,14 +1555,8 @@ def page_log():
                     ans = (f"\nANSWER: {a['response_label']}  (by {a['responded_by'] or '?'})"
                            + (f"\nNOTE FOR THE TEAM: {a['response_note']}" if a["response_note"] else ""))
                 st.text(f"To: {a['to_emails']}\nCC: {a['cc_emails']}\nSubject: {a['subject']}\nEmail status: {a['status']}  {a['last_error'] or ''}{ans}\n\n{a['body']}")
-                st.markdown("**History: answers, email replies and team notes (saved permanently)**")
-                tl = cases.timeline(pick)
-                if tl:
-                    t = pd.DataFrame(tl)
-                    t["created_at"] = t["created_at"].map(fmt)
-                    st.dataframe(t[["created_at", "source", "author", "text", "status_after"]], hide_index=True)
-                else:
-                    st.caption("No notes yet.")
+                st.markdown("**History of this alert's whole conversation (every email, answer, reply and note - saved permanently)**")
+                show_thread_history(pick, "pick")
                 cur = a["case_status"] or "open"
                 with st.form(f"case_form_{pick}"):
                     who = st.text_input("Your name", key=f"case_who_{pick}")
@@ -2064,7 +2118,7 @@ def page_cap_overview():
                 rc.set_deadline(240)
                 r = tg.run(force=True)
                 d = r["definitions"]
-                msg = f"Ringba has {d['in_ringba']} targets: {d['report']['with_daily_cap']} with a daily cap, {d['report']['with_monthly_cap']} with a monthly cap."
+                msg = f"Ringba has {d['in_ringba']} targets: {d['report']['with_daily_cap']} with a daily cap, {d['report']['with_monthly_cap']} with a monthly cap, {d['report'].get('with_global_cap', 0)} with a global cap."
                 if d.get("partial"):
                     msg += f" {d['unchecked']} targets are still waiting; they are read on the next 5-minute run (or press the button again)."
                 set_flash("flash_ov", "ok", msg)
@@ -2109,12 +2163,13 @@ def page_cap_overview():
                         "'Check one target' above with its ID and send me what it shows.")
             else:
                 df["usage_read"] = df["usage_read"].map(lambda v: ago(v) if v else "never")
-                show_df("ov_tg", df.sort_values(["today_pct", "month_pct"], ascending=False, na_position="last"), column_config={
+                show_df("ov_tg", df.sort_values(["today_pct", "month_pct", "global_pct"], ascending=False, na_position="last"), column_config={
                     "buyer": "Buyer", "target": "Target", "target_id": "Target ID", "enabled": st.column_config.CheckboxColumn("Enabled in Ringba"),
                     "daily_cap": st.column_config.NumberColumn("Daily cap"),
                     "used_today": st.column_config.NumberColumn("Used today"), "today_pct": prog("Today %"),
                     "monthly_cap": st.column_config.NumberColumn("Monthly cap"), "used_month": st.column_config.NumberColumn("Used this month"),
-                    "month_pct": prog("Month %"), "alerts_on": st.column_config.CheckboxColumn("Alerts on"), "usage_read": "Usage read"})
+                    "month_pct": prog("Month %"), "global_cap": st.column_config.NumberColumn("Global cap"), "used_global": st.column_config.NumberColumn("Used (global)"),
+                    "global_pct": prog("Global %"), "alerts_on": st.column_config.CheckboxColumn("Alerts on"), "usage_read": "Usage read"})
             bt = capview.buyer_totals(trows)
             with st.expander("Total per buyer (sum of its target caps)"):
                 show_df("ov_buyers", pd.DataFrame(bt), column_config={
@@ -2136,10 +2191,11 @@ def page_followups():
         st.error(f"Could not build the report: {e}")
         return
     will = [r for r in rows if r["will_send"] == "Yes"]
-    skip = [r for r in rows if r["will_send"].startswith("No")]
+    skip = [r for r in rows if r["will_send"].startswith("No - the DID") or r["will_send"].startswith("No - DID")]
+    paused_n = sum(1 for r in rows if r.get("paused_until"))
     due = [r for r in will if r["next_followup"] and r["next_followup"] <= now + timedelta(days=1)]
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Follow-ups scheduled", len(will))
+    k1.metric("Follow-ups scheduled", len(will), help=f"{paused_n} of the DIDs in the list are paused by an affiliate manager's answer")
     k2.metric("Due in the next 24 hours", len(due))
     k3.metric("Will be SKIPPED (DID retired)", len(skip), help="These DIDs were retired or deleted: no email will be sent")
     k4.metric("Last live check of Ringba", ago(db.get_setting("numbers_live_checked_at") or db.get_setting("numbers_last_ok")) if (db.get_setting("numbers_live_checked_at") or db.get_setting("numbers_last_ok")) else "never")
@@ -2150,7 +2206,7 @@ def page_followups():
         if not shown:
             st.info("No follow-up is scheduled right now.")
         else:
-            recs = [{"next_email": fmt(r["next_followup"]) if r["next_followup"] else "", "will_send": r["will_send"], "did": r["did"], "label": r["label"],
+            recs = [{"next_email": fmt(r["next_followup"]) if r["next_followup"] else "", "will_send": r["will_send"], "code": r["code"], "did": r["did"], "label": r["label"],
                      "publisher": r["publisher"], "campaign": r["campaign"], "type": r["kind"], "what_happens": r["why"],
                      "previous_response": r["previous_response"], "answered_by": r["responded_by"],
                      "answered_at": fmt(r["responded_at"]) if r["responded_at"] else "", "note": r["response_note"],
@@ -2158,7 +2214,7 @@ def page_followups():
                      "followups_sent": r["followups_sent"], "did_status": r["did_status"]} for r in shown]
             df = pd.DataFrame(recs)
             show_df("followups", df, column_config={
-                "next_email": "Next email", "will_send": "Will it be sent?", "did": "DID", "label": "Label", "publisher": "Publisher", "campaign": "Campaign",
+                "next_email": "Next email", "will_send": "Will it be sent?", "code": st.column_config.TextColumn("Alert code", help="The [#A..] code in the e-mail subject. Search it in the Alert Log to see the whole history."), "did": "DID", "label": "Label", "publisher": "Publisher", "campaign": "Campaign",
                 "type": "Alert type", "what_happens": "What happens", "previous_response": "AM's previous response", "answered_by": "Answered by",
                 "answered_at": "Answered at", "note": "AM's note", "paused_days": st.column_config.NumberColumn("Paused for (days)", help="How many days the previous answer paused this DID"),
                 "last_email": "Last email sent", "followups_sent": st.column_config.NumberColumn("Follow-ups so far", help="Reminders / follow-ups already sent for this idle period"),
@@ -2187,10 +2243,10 @@ def page_followups():
         if not hist:
             st.info("No reminder or follow-up has been made yet.")
         else:
-            hdf = pd.DataFrame([{"when": fmt(r["when"]), "kind": r["kind"], "did": r["did"], "label": r["label"], "publisher": r["publisher"],
+            hdf = pd.DataFrame([{"when": fmt(r["when"]), "code": r["code"], "kind": r["kind"], "did": r["did"], "label": r["label"], "publisher": r["publisher"],
                                  "email": r["email_status"], "response": r["response"], "team_status": cases.label(r["case"]), "did_now": r["did_now"],
                                  "note": r["note"]} for r in hist])
-            show_df("followups_hist", hdf, column_config={"when": "When", "kind": "What", "did": "DID", "label": "Label", "publisher": "Publisher",
+            show_df("followups_hist", hdf, column_config={"when": "When", "code": "Alert code", "kind": "What", "did": "DID", "label": "Label", "publisher": "Publisher",
                                                             "email": "Email status", "response": "AM's response", "team_status": "Team status",
                                                             "did_now": "DID status now", "note": "Note"})
 

@@ -803,8 +803,19 @@ def find_caps(obj, _depth=0, _path=""):
     return found, seen
 
 
+def _all_time_cap(it):
+    """Ringba's "Global Call Cap" (the cap on the whole target for ever). It is stored as schedule.allTimeCap; -1 / 0 = no cap."""
+    for src in (it.get("schedule") if isinstance(it.get("schedule"), dict) else {}, it):
+        for k, v in src.items():
+            if re.sub(r"[^a-z]", "", str(k).lower()) in ("alltimecap", "globalcap", "globalcallcap", "lifetimecap") and not isinstance(v, (dict, list)):
+                n = cap_value(v)
+                if n:
+                    return n
+    return None
+
+
 def parse_target(it):
-    """One target from Ringba -> {'rid','name','buyer_rid','buyer_name','enabled','daily_cap','monthly_cap'} (or None)."""
+    """One target from Ringba -> {'rid','name','buyer_rid','buyer_name','enabled','daily_cap','monthly_cap','all_time_cap' (the Global Call Cap)} (or None)."""
     if not isinstance(it, dict):
         return None
     rid = as_str(_pick(it, ["id", "targetId"]))
@@ -819,7 +830,7 @@ def parse_target(it):
             "buyer_rid": as_str(buyer.get("id") or _pick(it, ["buyerId"])),
             "buyer_name": as_str(buyer.get("name") or _pick(it, ["buyerName"]) or (it.get("buyer") if isinstance(it.get("buyer"), str) else None)),
             "enabled": True if enabled is None else bool(enabled),
-            "daily_cap": caps.get("daily"), "monthly_cap": caps.get("monthly"),
+            "daily_cap": caps.get("daily"), "monthly_cap": caps.get("monthly"), "all_time_cap": _all_time_cap(it),
             "has_schedule": bool(caps), "cap_fields": seen}
 
 
@@ -833,7 +844,7 @@ def target_cap_debug(target_id):
         d = d["target"]
     t = parse_target(d) if isinstance(d, dict) else None
     out["name"] = t["name"] if t else None
-    out["read_as"] = {"daily_cap": t["daily_cap"], "monthly_cap": t["monthly_cap"], "enabled": t["enabled"]} if t else None
+    out["read_as"] = {"daily_cap": t["daily_cap"], "monthly_cap": t["monthly_cap"], "global_cap": t["all_time_cap"], "enabled": t["enabled"]} if t else None
     out["cap_fields"] = [{"field": p, "value": v} for p, v in (t["cap_fields"] if t else [])]
     out["top_level_keys"] = sorted(d)[:60] if isinstance(d, dict) else []
     out["enabled_flags_in_record"] = {k: d[k] for k in d if k in ("enabled", "isEnabled", "active", "isActive", "state", "status")} if isinstance(d, dict) else {}
@@ -885,7 +896,7 @@ def fetch_targets(max_details=2000, skip_details=None, workers=6):
             bad += 1
             continue
         parsed.append((it, t))
-    todo = [(i, it, t) for i, (it, t) in enumerate(parsed) if not (t["daily_cap"] or t["monthly_cap"]) and t["rid"] not in skip_details]
+    todo = [(i, it, t) for i, (it, t) in enumerate(parsed) if not (t["daily_cap"] or t["monthly_cap"] or t["all_time_cap"]) and t["rid"] not in skip_details]
     todo = todo[:max_details]
     out = [t for _, t in parsed]
     unchecked, no_cap_checked, details = [], [], 0
@@ -911,11 +922,12 @@ def fetch_targets(max_details=2000, skip_details=None, workers=6):
                 if full:
                     out[i] = full
                     t = full
-                if not (t["daily_cap"] or t["monthly_cap"]):
+                if not (t["daily_cap"] or t["monthly_cap"] or t["all_time_cap"]):
                     no_cap_checked.append(t["rid"])
     keys = sorted({k for it in items if isinstance(it, dict) for k in it})[:40]
     report = {"count": len(items), "parsed": len(out), "invalid": bad, "detail_calls": details,
               "with_daily_cap": sum(1 for t in out if t["daily_cap"]), "with_monthly_cap": sum(1 for t in out if t["monthly_cap"]),
+              "with_global_cap": sum(1 for t in out if t["all_time_cap"]),
               "first_item_keys": keys, "partial": bool(unchecked), "unchecked": unchecked, "no_cap_checked": no_cap_checked}
     if items and not out:
         raise RingbaError("Ringba returned targets but I could not find their id field. Fields it returned: " + ", ".join(keys))

@@ -36,18 +36,18 @@ def sync_definitions(now=None):
     now = now or db.now_utc()
     import json
     try:
-        nocap = json.loads(db.get_setting("targets_nocap_cache_v3", "") or "{}")
+        nocap = json.loads(db.get_setting("targets_nocap_cache_v4", "") or "{}")
     except ValueError:
         nocap = {}
     nocap = {k: v for k, v in nocap.items() if v and db.to_dt(v) > now - timedelta(hours=NOCAP_HOURS)}     # "checked, no cap" is trusted for a day
     items, report = rc.fetch_targets(skip_details=set(nocap))
     for rid in report.get("no_cap_checked", []):
         nocap[rid] = now.isoformat()
-    db.set_setting("targets_nocap_cache_v3", json.dumps(nocap))
+    db.set_setting("targets_nocap_cache_v4", json.dumps(nocap))
     unchecked = set(report.get("unchecked", []))
     by_rid, by_name = _buyer_lookup()
     from_calls = None
-    have = {r["ringba_target_id"]: r for r in db.q("SELECT id, ringba_target_id, name, buyer_id, buyer_name, active, daily_cap, monthly_cap FROM targets")}
+    have = {r["ringba_target_id"]: r for r in db.q("SELECT id, ringba_target_id, name, buyer_id, buyer_name, active, daily_cap, monthly_cap, all_time_cap FROM targets")}
     added = updated = 0
     seen = set()
     for t in items:
@@ -59,9 +59,9 @@ def sync_definitions(now=None):
             bid = from_calls.get((t["name"] or "").strip().lower())
         row = have.get(t["rid"])
         if row is None:
-            db.x("INSERT INTO targets (ringba_target_id, name, buyer_id, buyer_name, active, daily_cap, monthly_cap, synced_at) "
-                 "VALUES (:r,:n,:b,:bn,:a,:d,:m,:s)", r=t["rid"], n=t["name"], b=bid, bn=t["buyer_name"], a=t["enabled"],
-                 d=t["daily_cap"], m=t["monthly_cap"], s=now)
+            db.x("INSERT INTO targets (ringba_target_id, name, buyer_id, buyer_name, active, daily_cap, monthly_cap, all_time_cap, synced_at) "
+                 "VALUES (:r,:n,:b,:bn,:a,:d,:m,:g,:s)", r=t["rid"], n=t["name"], b=bid, bn=t["buyer_name"], a=t["enabled"],
+                 d=t["daily_cap"], m=t["monthly_cap"], g=t["all_time_cap"], s=now)
             added += 1
         else:
             # Only write what really changed: one database round trip costs about a second on a remote database, and a few hundred
@@ -71,15 +71,15 @@ def sync_definitions(now=None):
             new_bn = t["buyer_name"] if t["buyer_name"] else row["buyer_name"]
             same = (row["name"] == t["name"] and row["buyer_id"] == new_bid and row["buyer_name"] == new_bn
                     and bool(row["active"]) == bool(t["enabled"])
-                    and (keep_caps or (row["daily_cap"] == t["daily_cap"] and row["monthly_cap"] == t["monthly_cap"])))
+                    and (keep_caps or (row["daily_cap"] == t["daily_cap"] and row["monthly_cap"] == t["monthly_cap"] and row["all_time_cap"] == t["all_time_cap"])))
             if same:
                 continue
             if keep_caps:
                 db.x("UPDATE targets SET name=:n, buyer_id=:b, buyer_name=:bn, active=:a, synced_at=:s WHERE id=:i",
                      n=t["name"], b=new_bid, bn=new_bn, a=t["enabled"], s=now, i=row["id"])
             else:
-                db.x("UPDATE targets SET name=:n, buyer_id=:b, buyer_name=:bn, active=:a, daily_cap=:d, monthly_cap=:m, synced_at=:s WHERE id=:i",
-                     n=t["name"], b=new_bid, bn=new_bn, a=t["enabled"], d=t["daily_cap"], m=t["monthly_cap"], s=now, i=row["id"])
+                db.x("UPDATE targets SET name=:n, buyer_id=:b, buyer_name=:bn, active=:a, daily_cap=:d, monthly_cap=:m, all_time_cap=:g, synced_at=:s WHERE id=:i",
+                     n=t["name"], b=new_bid, bn=new_bn, a=t["enabled"], d=t["daily_cap"], m=t["monthly_cap"], g=t["all_time_cap"], s=now, i=row["id"])
             updated += 1
     if items:
         db.x("UPDATE targets SET synced_at=:s WHERE synced_at IS NULL OR synced_at < :s", s=now)      # one statement for "checked just now"
@@ -96,7 +96,7 @@ def poll_counts(now=None, max_errors=5, workers=6):
     (the least recently read targets are read first next time). Returns stats."""
     from concurrent.futures import ThreadPoolExecutor
     now = now or db.now_utc()
-    rows = db.q("SELECT id, ringba_target_id FROM targets WHERE active = TRUE AND (daily_cap IS NOT NULL OR monthly_cap IS NOT NULL) "
+    rows = db.q("SELECT id, ringba_target_id FROM targets WHERE active = TRUE AND (daily_cap IS NOT NULL OR monthly_cap IS NOT NULL OR all_time_cap IS NOT NULL) "
                 "ORDER BY counts_at IS NOT NULL, counts_at")
     res = {"polled": 0, "failed": 0, "total": len(rows)}
 
@@ -122,7 +122,7 @@ def poll_counts(now=None, max_errors=5, workers=6):
             if c is None:
                 res["failed"] += 1
                 continue
-            db.x("UPDATE targets SET count_day=:d, count_month=:m, counts_at=:n WHERE id=:i", d=c["day"], m=c["month"], n=db.now_utc(), i=r["id"])
+            db.x("UPDATE targets SET count_day=:d, count_month=:m, count_total=:g, counts_at=:n WHERE id=:i", d=c["day"], m=c["month"], g=c.get("total"), n=db.now_utc(), i=r["id"])
             res["polled"] += 1
     return res
 

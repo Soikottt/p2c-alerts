@@ -196,7 +196,7 @@ def next_step_text(days, remind_days, remind_max, reminders_sent, next_cycle_idl
 
 
 def rule_target_caps(now):
-    """Buyer target caps (daily AND monthly). Limits and live usage come from Ringba (see targets.py)."""
+    """Buyer target caps (daily, monthly AND the global call cap). Limits and live usage come from Ringba (see targets.py)."""
     if not alerts.rule_enabled("target_cap"):
         return 0
     import targets as tg
@@ -205,7 +205,8 @@ def rule_target_caps(now):
         at = to_dt(t["counts_at"])
         if now - at > timedelta(minutes=tg.STALE_MINUTES):
             continue                                   # usage is old (the poll did not get through): never alert on old numbers
-        for period, cap, used in (("daily", t["daily_cap"], t["count_day"]), ("monthly", t["monthly_cap"], t["count_month"])):
+        for period, cap, used in (("daily", t["daily_cap"], t["count_day"]), ("monthly", t["monthly_cap"], t["count_month"]),
+                                  ("global", t.get("all_time_cap"), t.get("count_total"))):
             if not cap:
                 continue
             used = int(used or 0)
@@ -214,7 +215,10 @@ def rule_target_caps(now):
             if not reached:
                 continue
             top = max(reached)
-            start, wkey = window_start(period, at)     # the window the numbers were read in, so midnight cannot cause a repeat
+            if period == "global":                     # the Global Call Cap has no window: one alert per level for this cap size
+                start, wkey = at, "all"
+            else:
+                start, wkey = window_start(period, at)     # the window the numbers were read in, so midnight cannot cause a repeat
             ctx = {"target": t["name"] or t["ringba_target_id"], "buyer": t["buyer_name"] or "-", "period": period,
                    "percent": f"{pct:.0f}", "level": top, "usage": used, "cap": cap, "remaining": max(cap - used, 0),
                    "window_start": fmt(start)}
@@ -279,7 +283,7 @@ def rule_inactive_dids(now):
         return 0
 
     chains = {}       # base key -> that idle period's alerts, oldest first (the alert, its reminders, its follow-ups)
-    for a in db.q("SELECT id, dedupe_key, status, created_at, sent_at, response_label, responded_at, case_status FROM alerts "
+    for a in db.q("SELECT id, dedupe_key, status, created_at, sent_at, response_label, responded_at, case_status, case_updated_at FROM alerts "
                   "WHERE alert_type='did_inactive' AND status <> 'skipped' AND dedupe_key LIKE 'did:%' ORDER BY id"):
         parts = a["dedupe_key"].split(":")
         if len(parts) >= 4:
@@ -309,47 +313,31 @@ def rule_inactive_dids(now):
                 "last_note": cases.one_line(e["notes"].get(d["id"]), fmt) or "none yet",
                 "next_step": next_step_text(days, remind_days, remind_max, reminders_sent, (cycle + 1) * days)}
 
+    import chain as chainlib
     made = 0
     for d, ref, idle in idle_dids:
         cycle = idle // days
         base = f"did:{d['id']}:{ref.date()}:{cycle}"
         chain = chains.get(base, [])
+        ev = chainlib.evaluate(chain, now, snoozes.get(f"did:{d['id']}"), remind_days, remind_max, base)
         key, tag, reminders_sent = base, "", 0
+        thread_root, history = None, None
         if chain:
-            last = chain[-1]
-            if last["status"] == "pending":
-                continue                                    # not even sent yet
-            case = last["case_status"] or "open"
-            when = to_dt(last["sent_at"] or last["created_at"])
-            reminders_sent = 0
-            for a in reversed(chain):                       # reminders since the newest real alert / follow-up
-                if ":r" in a["dedupe_key"][len(base):]:
-                    reminders_sent += 1
-                else:
-                    break
-            if not last["response_label"] and case == "open":
-                # nobody answered at all
-                if remind_days <= 0 or reminders_sent >= remind_max or when + timedelta(days=remind_days) > now:
-                    continue
-                key, tag = f"{base}:r{last['id']}", f"REMINDER {reminders_sent + 1}/{remind_max}: "
-                reminders_sent += 1
-            elif last["response_label"] and case in ("open", "follow_up"):
-                # somebody clicked 'wait N days': when that pause is over, ask again
-                until = snoozes.get(f"did:{d['id']}")
-                responded = to_dt(last["responded_at"])
-                if not (until and until <= now and responded and until > responded):
-                    continue
-                key, tag, reminders_sent = f"{base}:f{last['id']}", "FOLLOW-UP (pause ended): ", 0
-            else:
-                continue                                    # answered / being handled by the team
+            # the chain judges every alert and answer of THIS DID (not only the newest e-mail), see chain.py
+            if ev["state"] not in ("reminder", "followup_due") or ev["next_at"] is None or ev["next_at"] > now:
+                continue
+            key, tag, reminders_sent = ev["key"], ev["tag"], ev["reminders"] + (1 if ev["state"] == "reminder" else 0)
+            thread_root = chain[0]["id"]                  # the follow-up is an answer in the SAME e-mail conversation: same [#A..] code
         if tag and not did_still_needs_follow_up(d, now):          # a follow-up / reminder: check Ringba first
             alerts.create_alert("did_inactive", f"{key}:cancelled", status="skipped", subject="(follow-up cancelled: DID retired)",
                                 body="This follow-up was cancelled because the DID was deleted / retired in Ringba before it was sent.",
                                 publisher_id=d["publisher_id"], snooze_key=f"did:{d['id']}")
             continue
         ctx = make_ctx(d, idle, cycle, reminders_sent)
+        if thread_root:
+            ctx["history"] = chainlib.history_text(thread_root)
         if alerts.create_alert("did_inactive", key, ctx, publisher_id=d["publisher_id"], snooze_key=f"did:{d['id']}",
-                               subject_tag=tag):
+                               subject_tag=tag, thread_id=thread_root):
             made += 1
     return made
 
@@ -377,12 +365,18 @@ def rule_new_dids_no_calls(now):
         return 0
     last = {}      # did id -> (number of alerts so far, time of the newest, is it still waiting to be sent)
     handled = set()   # DIDs whose newest alert the team closed ('done' / 'no action'): no more repeat alerts
-    for a in db.q("SELECT dedupe_key, status, created_at, sent_at, case_status FROM alerts WHERE alert_type='did_new_no_calls' "
+    import chain as chainlib
+    newchains, first_id = {}, {}
+    for a in db.q("SELECT id, dedupe_key, status, created_at, sent_at, case_status, case_updated_at FROM alerts WHERE alert_type='did_new_no_calls' "
                   "AND status <> 'skipped' AND dedupe_key LIKE 'newdid:%' ORDER BY id"):
         did = a["dedupe_key"].split(":")[1]
         n = last.get(did, (0,))[0] + 1
         last[did] = (n, to_dt(a["sent_at"] or a["created_at"]), a["status"] == "pending")
-        (handled.add if (a["case_status"] or "open") in ("done", "no_action") else handled.discard)(did)
+        newchains.setdefault(did, []).append(a)
+        first_id.setdefault(did, a["id"])
+    for did, ch in newchains.items():          # closed by the team (newest status done / no action): no more repeat alerts
+        if chainlib.closed_by_team(ch):
+            handled.add(did)
     snoozes = {r["entity_key"]: to_dt(r["snooze_until"]) for r in db.q("SELECT entity_key, snooze_until FROM snoozes WHERE entity_key LIKE 'did:%'")}
     import dids as didtools
     pub = {x["id"]: x["name"] for x in db.q("SELECT id, name FROM publishers")}
@@ -410,8 +404,11 @@ def rule_new_dids_no_calls(now):
                "next_charge": fmt(d["next_charge_at"], False) if d["next_charge_at"] else "unknown",
                "next_step": (f"If nobody answers this email: another alert is sent in {every} day(s), until this DID gets its first call. "
                              f"If you click Pause, nothing is sent for the days you choose, then the alerts continue.")}
+        root = first_id.get(str(d["id"]))
+        if root:                                # a repeat alert is an answer in the SAME e-mail conversation (same [#A..] code) + the history
+            ctx["history"] = chainlib.history_text(root)
         if alerts.create_alert("did_new_no_calls", f"newdid:{d['id']}:{n + 1}", ctx, publisher_id=d["publisher_id"],
-                               snooze_key=f"did:{d['id']}", subject_tag="REMINDER: " if n else ""):
+                               snooze_key=f"did:{d['id']}", subject_tag="REMINDER: " if n else "", thread_id=root):
             made += 1
     return made
 

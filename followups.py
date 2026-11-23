@@ -5,12 +5,13 @@ upcoming(now)  -> one row per DID that has a follow-up / reminder / repeat alert
 preview(row)   -> (subject, plain text, html) of the email that will be sent next
 history(limit) -> follow-ups, reminders and cancelled follow-ups that already happened
 """
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import db
 from db import to_dt
 from timeutil import fmt
 
+_MIN = datetime(1970, 1, 1, tzinfo=timezone.utc)
 TYPES = ("did_inactive", "did_new_no_calls")
 
 
@@ -44,6 +45,17 @@ def _row(kind, d, pub, camp, chain_len, last_email, resp, snooze, next_when, not
             "why": note, "alert_type": alert_type, "extra": extra}
 
 
+def _answers_by_did():
+    """{did id: {'response_label','responded_by','responded_at','response_note'}} - the newest answer in any alert of the DID."""
+    out = {}
+    for a in db.q("SELECT snooze_key, response_label, responded_at, responded_by, response_note FROM alerts "
+                  "WHERE alert_type IN ('did_inactive','did_new_no_calls') AND response_label IS NOT NULL ORDER BY id"):
+        did = _did_id(a["snooze_key"])
+        if did and (did not in out or (to_dt(a["responded_at"]) or _MIN) >= (to_dt(out[did]["responded_at"]) or _MIN)):
+            out[did] = a
+    return out
+
+
 def upcoming(now=None):
     """Rows sorted by next date. 'will_send' says Yes / No + the reason, so you see at once what the engine will skip."""
     import dids as didtools
@@ -59,66 +71,53 @@ def upcoming(now=None):
     snoozes = {r["entity_key"]: r for r in db.q("SELECT entity_key, snooze_until, reason FROM snoozes WHERE entity_key LIKE 'did:%'")}
     rows = []
 
-    # ---- inactive DIDs: reminders and 'wait N days' follow-ups
-    latest = {}                                     # did id -> (base key, [alerts of that idle period, oldest first])
-    for a in db.q("SELECT id, dedupe_key, status, created_at, sent_at, response_label, responded_at, responded_by, response_note, case_status "
+    # ---- inactive DIDs: reminders and 'wait N days' follow-ups. Every DID chain is judged by chain.evaluate (the same code the engine uses).
+    import chain as chainlib
+    chains = {}                                     # base key -> alerts of that idle period, oldest first
+    for a in db.q("SELECT id, dedupe_key, status, created_at, sent_at, response_label, responded_at, responded_by, response_note, case_status, case_updated_at "
                   "FROM alerts WHERE alert_type='did_inactive' AND status <> 'skipped' AND dedupe_key LIKE 'did:%' ORDER BY id"):
         parts = a["dedupe_key"].split(":")
-        did = _did_id(a["dedupe_key"])
-        if len(parts) < 4 or did not in dids:
-            continue
-        base = ":".join(parts[:4])
-        if did not in latest or latest[did][0] != base:
-            latest[did] = (base, [])
-        latest[did][1].append(a)
-    for did, (base, chain) in latest.items():
+        if len(parts) >= 4 and _did_id(a["dedupe_key"]) in dids:
+            chains.setdefault(":".join(parts[:4]), []).append(a)
+    newest = {}                                     # did id -> its newest chain (older idle periods are history, not follow-ups)
+    for base, ch in chains.items():
+        did = _did_id(base)
+        if did not in newest or ch[0]["id"] > newest[did][1][0]["id"]:
+            newest[did] = (base, ch)
+    answers = _answers_by_did()                     # the newest answer of the DID in ANY of its alerts (older chains too)
+    for did, (base, chain) in newest.items():
         d = dids[did]
+        sn = snoozes.get(f"did:{did}")
+        until = to_dt(sn["snooze_until"]) if sn else None
+        ev = chainlib.evaluate(chain, now, until, cfg["remind_days"], cfg["remind_max"], base)
         last = chain[-1]
-        resp = next((a for a in reversed(chain) if a["response_label"]), None)
-        case = last["case_status"] or "open"
         when = to_dt(last["sent_at"] or last["created_at"])
-        sent_n = sum(1 for a in chain if a["status"] != "pending")
-        reminders = 0
-        for a in reversed(chain):
-            if ":r" in a["dedupe_key"][len(base):]:
-                reminders += 1
-            else:
-                break
-        nxt, note, tag = None, "", ""
-        if last["status"] == "pending":
-            nxt, note = now, "Waiting in the send queue"
-        elif not last["response_label"] and case == "open":
-            if cfg["remind_days"] > 0 and reminders < cfg["remind_max"]:
-                nxt, note, tag = when + timedelta(days=cfg["remind_days"]), f"Reminder {reminders + 1} of {cfg['remind_max']} if nobody answers", f"REMINDER {reminders + 1}/{cfg['remind_max']}: "
-            else:
-                note = "No more reminders for this idle period"
-        elif last["response_label"] and case in ("open", "follow_up"):
-            sn = snoozes.get(f"did:{did}")
-            until = to_dt(sn["snooze_until"]) if sn else None
-            if until and to_dt(last["responded_at"]) and until > to_dt(last["responded_at"]):
-                nxt, note, tag = until, "Follow-up when the pause ends", "FOLLOW-UP (pause ended): "
-            else:
-                note = "Answered, no pause set: nothing scheduled"
-        else:
-            note = f"Handled by the team (status: {case})"
-        if nxt is None:
-            continue                                # nothing scheduled: not a follow-up row
+        if ev["state"] == "closed":
+            continue                                # the team finished it: nothing to follow
+        resp = answers.get(did)
+        scheduled = ev["next_at"] is not None
+        nxt = ev["next_at"]
         will = "Yes"
         ref = to_dt(d["last_call_at"]) or to_dt(d["added_at"])
         if d["status"] != "active":
             will = "No - the DID is retired / deleted in Ringba"
         elif d["never_alert"]:
             will = "No - DID is set to never alert"
-        elif ref and (nxt - ref).days < idle_days and nxt > now:
+        elif not scheduled:
+            will = "No - nothing scheduled (" + ev["note"].split(":")[0].lower() + ")"
+        elif ref and nxt and (nxt - ref).days < idle_days and nxt > now:
             will = "Only if it still has no calls then"
-        resp_d = resp
-        sn = snoozes.get(f"did:{did}")
-        rows.append(_row("Inactive DID", d, pub, camp, len(chain), when, resp_d, sn, nxt, note, will, "did_inactive",
-                         {"tag": tag, "reminders": reminders, "base": base, "idle_ref": ref}))
+        sent_n = sum(1 for a in chain if a["status"] != "pending")
+        r = _row("Inactive DID", d, pub, camp, len(chain), when, resp, sn, nxt, ev["note"], will, "did_inactive",
+                 {"tag": ev["tag"], "reminders": ev["reminders"], "base": base, "idle_ref": ref, "root_id": chain[0]["id"], "state": ev["state"]})
+        r["scheduled"], r["state"], r["code"] = scheduled, ev["state"], f"#A{chain[0]['id']}"
+        r["paused_until"] = until if ev["state"] in ("paused", "followup_due") else None
+        rows.append(r)
 
     # ---- new DIDs without a first call: repeat alert every N days
     groups = {}
-    for a in db.q("SELECT id, dedupe_key, status, created_at, sent_at, response_label, responded_at, responded_by, response_note, case_status "
+    ans_all = _answers_by_did()
+    for a in db.q("SELECT id, dedupe_key, status, created_at, sent_at, response_label, responded_at, responded_by, response_note, case_status, case_updated_at "
                   "FROM alerts WHERE alert_type='did_new_no_calls' AND status <> 'skipped' AND dedupe_key LIKE 'newdid:%' ORDER BY id"):
         did = _did_id(a["dedupe_key"])
         if did in dids:
@@ -129,8 +128,8 @@ def upcoming(now=None):
         if d["last_call_at"] is not None:
             continue                                # first call arrived: nothing more to follow up
         when = to_dt(last["sent_at"] or last["created_at"])
-        case = last["case_status"] or "open"
-        if case in ("done", "no_action"):
+        import chain as chainlib
+        if chainlib.closed_by_team(chain):
             continue
         sn = snoozes.get(f"did:{did}")
         until = to_dt(sn["snooze_until"]) if sn else None
@@ -138,15 +137,18 @@ def upcoming(now=None):
         note = f"Repeat alert every {every} day(s) until the first call"
         if until and until > nxt:
             nxt, note = until, "Alert comes back when the pause ends"
-        resp = next((a for a in reversed(chain) if a["response_label"]), None)
+        resp = next((a for a in reversed(chain) if a["response_label"]), None) or ans_all.get(did)
         will = "Yes"
         if d["status"] != "active":
             will = "No - the DID is retired / deleted in Ringba"
         elif d["never_alert"]:
             will = "No - DID is set to never alert"
-        rows.append(_row("New DID, no calls yet", d, pub, camp, len(chain), when, resp, sn, nxt, note, will, "did_new_no_calls",
-                         {"tag": "REMINDER: ", "n": len(chain)}))
-    rows.sort(key=lambda r: (r["will_send"] != "Yes", r["next_followup"] or now))
+        r = _row("New DID, no calls yet", d, pub, camp, len(chain), when, resp, sn, nxt, note, will, "did_new_no_calls",
+                 {"tag": "REMINDER: ", "n": len(chain), "root_id": chain[0]["id"]})
+        r["scheduled"], r["state"], r["code"] = True, "repeat", f"#A{chain[0]['id']}"
+        r["paused_until"] = until if until and until > now else None
+        rows.append(r)
+    rows.sort(key=lambda r: (not r["scheduled"], r["will_send"] != "Yes", r["next_followup"] or now))
     return rows
 
 
@@ -189,6 +191,20 @@ def preview(row, now=None):
     subj_t, body_t = templates.get_template(row["alert_type"], rule)
     if ctx.get("next_step") and "{next_step}" not in body_t:
         body_t = body_t + "\n\n{next_step}"
+    root = row["extra"].get("root_id")
+    if root:                       # a follow-up is an answer in the SAME e-mail conversation: same subject, same [#A..] code, plus the history
+        import chain as chainlib
+        ctx["history"] = chainlib.history_text(root)
+        if "{history}" not in body_t:
+            body_t = body_t + "\n\nHistory of answers on this alert:\n{history}"
+        parent = db.q1("SELECT subject FROM alerts WHERE id=:i", i=int(root))
+        base_subject = parent["subject"] if parent else ""
+        subject = base_subject if base_subject.lower().startswith("re:") else ("Re: " + base_subject if base_subject else "")
+        text, html = templates.render_body(body_t, ctx)
+        if tag.strip():
+            text = f"{tag.strip()}\n\n{text}"
+            html = f"<p><b>{tag.strip()}</b></p>{html}" if html else html
+        return subject, text, html
     subject = f"{db.get_setting('subject_prefix', '[P2C Alert]')} {tag}{templates.render(subj_t, ctx)}".strip()
     text, html = templates.render_body(body_t, ctx)
     return subject, text, html
@@ -196,7 +212,7 @@ def preview(row, now=None):
 
 def history(limit=300):
     """Follow-ups, reminders and repeat alerts that were made, and follow-ups that were cancelled because the DID is retired. Newest first."""
-    rows = db.q("SELECT id, alert_type, dedupe_key, status, created_at, sent_at, response_label, responded_by, case_status, snooze_key, last_error "
+    rows = db.q("SELECT id, alert_type, dedupe_key, status, created_at, sent_at, response_label, responded_by, case_status, snooze_key, last_error, thread_id "
                 "FROM alerts WHERE alert_type IN ('did_inactive','did_new_no_calls') ORDER BY id DESC LIMIT :n", n=int(limit) * 3)
     dids = {d["id"]: d for d in db.q("SELECT id, number, label, status, publisher_id FROM dids")}
     pub = {p["id"]: p["name"] for p in db.q("SELECT id, name FROM publishers")}
@@ -218,7 +234,7 @@ def history(limit=300):
         if not kind:
             continue
         d = dids.get(_did_id(a["snooze_key"] or key))
-        out.append({"alert_id": a["id"], "when": to_dt(a["sent_at"] or a["created_at"]), "kind": kind, "did": d["number"] if d else "?",
+        out.append({"alert_id": a["id"], "code": f"#A{a['thread_id'] or a['id']}", "when": to_dt(a["sent_at"] or a["created_at"]), "kind": kind, "did": d["number"] if d else "?",
                     "label": (d["label"] if d else "") or "", "publisher": pub.get(d["publisher_id"], "") if d else "",
                     "email_status": a["status"], "response": a["response_label"] or "", "case": a["case_status"] or "open",
                     "did_now": _status_text({**d, "never_alert": False}) if d else "?", "note": a["last_error"] or ""})

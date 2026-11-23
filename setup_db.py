@@ -88,6 +88,10 @@ ADD_COLUMNS = [
     ("calls", "campaign_rid", "TEXT"),
     ("alerts", "case_status", "TEXT DEFAULT 'open'"),
     ("alerts", "case_updated_at", "TIMESTAMPTZ"),
+    ("alerts", "claimed_at", "TIMESTAMPTZ"),
+    ("alerts", "sent_to", "TEXT"),
+    ("targets", "all_time_cap", "INTEGER"),
+    ("targets", "count_total", "INTEGER"),
 ]
 
 # The first wording of the inactive-DID email. Saved templates that still have EXACTLY this text are upgraded.
@@ -186,7 +190,8 @@ def ensure_columns():
         db.q1("SELECT never_alert FROM dids LIMIT 1")
         db.q1("SELECT campaign_name FROM caps LIMIT 1")
         db.q1("SELECT ringba_target_id FROM targets LIMIT 1")
-        db.q1("SELECT thread_id FROM alerts LIMIT 1")
+        db.q1("SELECT thread_id, claimed_at, sent_to FROM alerts LIMIT 1")
+        db.q1("SELECT all_time_cap, count_total FROM targets LIMIT 1")
         db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
         db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count FROM tasks LIMIT 1")
         db.q1("SELECT event FROM task_log LIMIT 1")

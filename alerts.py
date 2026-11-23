@@ -150,6 +150,11 @@ def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=N
         full_subject = base if base.lower().startswith("re:") else "Re: " + base
     else:
         full_subject = f"{prefix} {subject}".strip() + f" [#A{alert_id}]"     # replies keep this tag, so they can be matched
+    if thread_id and subject_tag.strip() and status != "skipped":
+        # the subject stays the same (same code, same thread); the kind of follow-up is written at the top of the e-mail instead
+        import html as _h
+        body = f"{subject_tag.strip()}\n\n{body}"
+        body_html = f"<p><b>{_h.escape(subject_tag.strip())}</b></p>{body_html}" if body_html else body_html
     text, html = (actions.attach(alert_id, alert_type, body, body_html) if status == "pending" else (body, body_html))
     db.x("UPDATE alerts SET subject=:s, body=:b, body_html=:h WHERE id=:i", s=full_subject, b=text, h=html, i=alert_id)
     _budget["created"] += 1
@@ -157,15 +162,10 @@ def create_alert(alert_type, dedupe_key, ctx=None, publisher_id=None, buyer_id=N
 
 
 def answer_history(alert_id):
-    """Everything answered on this alert so far (button answers, e-mail replies, team notes), oldest first. Plain text lines."""
-    import cases
-    from timeutil import fmt
-    lines = []
-    for n in cases.timeline(alert_id):
-        who = n["author"] or "someone"
-        how = {"answer": "answer button", "email": "e-mail reply", "team": "team note"}.get(n["source"], n["source"])
-        lines.append(f"- {fmt(n['created_at'])} - {who} ({how}): " + " ".join((n["text"] or "").split())[:400])
-    return "\n".join(lines) or "- (nothing yet)"
+    """The whole history of the e-mail conversation this alert belongs to (every alert / follow-up sent, every answer, reply and
+    team note), oldest first. Plain text lines. Same code, same history, whichever email of the chain you start from."""
+    import chain
+    return chain.history_text(alert_id)
 
 
 def delete_alerts(ids, also_resume_pauses=True):
