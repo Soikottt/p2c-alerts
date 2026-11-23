@@ -46,6 +46,7 @@ def sync_definitions(now=None):
     db.set_setting("targets_nocap_cache_v4", json.dumps(nocap))
     unchecked = set(report.get("unchecked", []))
     by_rid, by_name = _buyer_lookup()
+    names = {b["id"]: b["name"] for b in db.q("SELECT id, name FROM buyers")}      # buyer id -> name, to fill in a missing buyer name
     from_calls = None
     have = {r["ringba_target_id"]: r for r in db.q("SELECT id, ringba_target_id, name, buyer_id, buyer_name, active, daily_cap, monthly_cap, all_time_cap FROM targets")}
     added = updated = 0
@@ -60,7 +61,7 @@ def sync_definitions(now=None):
         row = have.get(t["rid"])
         if row is None:
             db.x("INSERT INTO targets (ringba_target_id, name, buyer_id, buyer_name, active, daily_cap, monthly_cap, all_time_cap, synced_at) "
-                 "VALUES (:r,:n,:b,:bn,:a,:d,:m,:g,:s)", r=t["rid"], n=t["name"], b=bid, bn=t["buyer_name"], a=t["enabled"],
+                 "VALUES (:r,:n,:b,:bn,:a,:d,:m,:g,:s)", r=t["rid"], n=t["name"], b=bid, bn=t["buyer_name"] or names.get(bid), a=t["enabled"],
                  d=t["daily_cap"], m=t["monthly_cap"], g=t["all_time_cap"], s=now)
             added += 1
         else:
@@ -68,7 +69,7 @@ def sync_definitions(now=None):
             # unchanged targets used to take minutes and made the whole engine run time out.
             keep_caps = t["rid"] in unchecked            # time ran out before its caps were read: keep the caps we already have
             new_bid = bid if bid is not None else row["buyer_id"]
-            new_bn = t["buyer_name"] if t["buyer_name"] else row["buyer_name"]
+            new_bn = t["buyer_name"] or row["buyer_name"] or names.get(new_bid)
             same = (row["name"] == t["name"] and row["buyer_id"] == new_bid and row["buyer_name"] == new_bn
                     and bool(row["active"]) == bool(t["enabled"])
                     and (keep_caps or (row["daily_cap"] == t["daily_cap"] and row["monthly_cap"] == t["monthly_cap"] and row["all_time_cap"] == t["all_time_cap"])))

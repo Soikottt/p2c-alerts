@@ -467,11 +467,12 @@ def page_dashboard():
     if tg_rows:
         st.subheader("Buyer target caps right now (from Ringba)")
         out = []
+        bnames = {b["id"]: b["name"] for b in db.q("SELECT id, name FROM buyers")}
         for t in tg_rows:
             for per, cap, used in (("daily", t["daily_cap"], t["count_day"]), ("monthly", t["monthly_cap"], t["count_month"]),
                                    ("global", t.get("all_time_cap"), t.get("count_total"))):
                 if cap:
-                    out.append({"Buyer": t["buyer_name"] or "", "Target": t["name"], "Period": per, "Used": used or 0, "Cap": cap,
+                    out.append({"Buyer": t["buyer_name"] or bnames.get(t["buyer_id"]) or "", "Target": t["name"], "Period": per, "Used": used or 0, "Cap": cap,
                                 "Percent": round((used or 0) / cap * 100, 1)})
         show_df("dash_tcaps", pd.DataFrame(out).sort_values("Percent", ascending=False))
 
@@ -1089,11 +1090,12 @@ def targets_section():
         st.info("No target with a cap yet. Press the button above (Ringba must have a daily or monthly cap on the target).")
         return
     recs = []
+    bnames = {b["id"]: b["name"] for b in db.q("SELECT id, name FROM buyers")}
     for r in rows:
         dp = round((r["count_day"] or 0) / r["daily_cap"] * 100, 1) if r["daily_cap"] else None
         mp = round((r["count_month"] or 0) / r["monthly_cap"] * 100, 1) if r["monthly_cap"] else None
         gp = round((r.get("count_total") or 0) / r["all_time_cap"] * 100, 1) if r.get("all_time_cap") else None
-        recs.append({"id": r["id"], "buyer": r["buyer_name"] or "", "target": r["name"],
+        recs.append({"id": r["id"], "buyer": r["buyer_name"] or bnames.get(r["buyer_id"]) or "", "target": r["name"],
                      "daily_cap": r["daily_cap"], "used_today": r["count_day"] if r["daily_cap"] else None, "today_pct": dp,
                      "monthly_cap": r["monthly_cap"], "used_month": r["count_month"] if r["monthly_cap"] else None, "month_pct": mp,
                      "global_cap": r.get("all_time_cap"), "used_global": r.get("count_total") if r.get("all_time_cap") else None, "global_pct": gp,

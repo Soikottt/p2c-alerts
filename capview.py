@@ -58,9 +58,10 @@ def publisher_caps(now=None):
 def target_caps(include_disabled=False):
     """One row per buyer target (active ones, or all with include_disabled): its global (whole-target) daily and monthly cap and usage, from Ringba."""
     out = []
+    names = {b["id"]: b["name"] for b in db.q("SELECT id, name FROM buyers")}
     for t in db.q("SELECT * FROM targets" + ("" if include_disabled else " WHERE active = TRUE") + " ORDER BY buyer_name, name"):
         dc, mc, gc = t["daily_cap"], t["monthly_cap"], t.get("all_time_cap")
-        out.append({"buyer": t["buyer_name"] or "", "target": t["name"] or t["ringba_target_id"], "target_id": t["ringba_target_id"],
+        out.append({"buyer": t["buyer_name"] or names.get(t["buyer_id"]) or "", "target": t["name"] or t["ringba_target_id"], "target_id": t["ringba_target_id"],
                     "daily_cap": dc, "used_today": (t["count_day"] or 0) if dc else None, "today_pct": _pct(t["count_day"] or 0, dc),
                     "monthly_cap": mc, "used_month": (t["count_month"] or 0) if mc else None, "month_pct": _pct(t["count_month"] or 0, mc),
                     "global_cap": gc, "used_global": (t.get("count_total") or 0) if gc else None, "global_pct": _pct(t.get("count_total") or 0, gc),
