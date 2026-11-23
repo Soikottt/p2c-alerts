@@ -155,7 +155,7 @@ def closed_by_team(chain):
     return (newest.get("case_status") or "open") in CLOSED
 
 
-def evaluate(chain, now, snooze_until, remind_days, remind_max, base):
+def _evaluate_core(chain, now, snooze_until, remind_days, remind_max, base):
     """What happens next for one DID chain (alerts oldest first). Returns a dict:
        state  : 'queued' | 'closed' | 'reminder' | 'reminders_done' | 'paused' | 'followup_due' | 'answered' | 'engaged'
        next_at: when the next email is due (None = nothing scheduled)
@@ -210,4 +210,15 @@ def evaluate(chain, now, snooze_until, remind_days, remind_max, base):
                    note=f"Reminder {out['reminders'] + 1} of {remind_max} if nobody answers")
     else:
         out.update(state="reminders_done", note="No more reminders for this idle period")
+    return out
+
+
+def evaluate(chain, now, snooze_until, remind_days, remind_max, base):
+    """See _evaluate_core. One extra rule, the same the engine uses when it creates an email (alerts.create_alert -> is_snoozed):
+    while a manager's pause is running, NOTHING is sent. So the next email of that DID is the end of the pause, whatever the e-mails
+    before it look like. (Before, the page could show a reminder date inside a running pause that the engine would never send.)"""
+    out = _evaluate_core(chain, now, snooze_until, remind_days, remind_max, base)
+    if chain and snooze_until and snooze_until > now and out["state"] not in ("new", "queued", "closed", "paused"):
+        out.update(state="paused", next_at=snooze_until, tag="FOLLOW-UP (pause ended): ", key=f"{base}:f{chain[-1]['id']}", reminders=0,
+                   note="Paused by the manager's answer - follow-up when the pause ends")
     return out

@@ -153,6 +153,30 @@ def _claim(alert_id):
                 n=now, i=alert_id, stale=now - timedelta(minutes=CLAIM_MINUTES)) > 0
 
 
+def _drop_for_paused_dids(rows, res):
+    """Last look before sending (2): an e-mail of a DID that an affiliate manager paused in the meantime (answered 'wait N days' after this
+    e-mail was queued) is cancelled, not sent. The record is kept."""
+    keys = {}
+    for a in rows:
+        k = str(a.get("snooze_key") or "")
+        if a["alert_type"] in ("did_inactive", "did_new_no_calls") and k.startswith("did:"):
+            keys[a["id"]] = k
+    if not keys:
+        return rows
+    now = db.now_utc()
+    paused = {r["entity_key"]: db.to_dt(r["snooze_until"]) for r in db.q_in("SELECT entity_key, snooze_until FROM snoozes WHERE entity_key IN :k", "k", sorted(set(keys.values())))}
+    keep = []
+    for a in rows:
+        until = paused.get(keys.get(a["id"]))
+        if a["id"] in keys and until and until > now:
+            db.x("UPDATE alerts SET status='skipped', last_error=:e WHERE id=:i", i=a["id"],
+                 e=f"Cancelled before sending: the affiliate manager paused this DID until {until:%Y-%m-%d %H:%M} UTC")
+            res["cancelled"] = res.get("cancelled", 0) + 1
+        else:
+            keep.append(a)
+    return keep
+
+
 def process_outbox(limit=25, max_seconds=None):
     """Send pending alerts (oldest first), at most `limit` per run and within `max_seconds`. The rest waits for the next run.
     Every alert is claimed first and every finished recipient is written down (sent_to), so a second sender or a retry after a
@@ -165,6 +189,7 @@ def process_outbox(limit=25, max_seconds=None):
     res["left"] = max(total - len(rows), 0)
     dry = is_dry_run()
     rows = _drop_for_retired_dids(rows, res)
+    rows = _drop_for_paused_dids(rows, res)
     session = Session()
     try:
         for idx, a in enumerate(rows):

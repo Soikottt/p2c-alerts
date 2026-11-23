@@ -2200,41 +2200,66 @@ def page_followups():
     except Exception as e:
         st.error(f"Could not build the report: {e}")
         return
-    will = [r for r in rows if r["will_send"] == "Yes"]
-    skip = [r for r in rows if r["will_send"].startswith("No - the DID") or r["will_send"].startswith("No - DID")]
-    paused_n = sum(1 for r in rows if r.get("paused_until"))
-    due = [r for r in will if r["next_followup"] and r["next_followup"] <= now + timedelta(days=1)]
+    is_yes = lambda r: r["will_send"] == "Yes" or r["will_send"].startswith("Only if")
+    will = [r for r in rows if is_yes(r)]
+    paused = [r for r in rows if r.get("paused_until") and is_yes(r)]
+    due = [r for r in will if r["next_followup"] and r["next_followup"] <= now + timedelta(days=1) and not r.get("paused_until")]
+    notsent = [r for r in rows if not is_yes(r)]
+    live = db.get_setting("numbers_live_checked_at") or db.get_setting("numbers_last_ok")
+    # ---- checks: mistakes must never go unseen
+    try:
+        probs = followups.health(now)
+    except Exception as e:
+        probs = [{"level": "bad", "title": "The checks could not run", "detail": str(e)[:200]}]
+    bad = [p for p in probs if p["level"] == "bad"]
+    warn = [p for p in probs if p["level"] == "warn"]
+    head = "🔴 " + f"{len(bad)} problem(s) need your attention" if bad else ("🟡 " + f"{len(warn)} thing(s) to look at" if warn else "🟢 All checks are fine")
+    with st.expander(f"🩺 Checks: {head}", expanded=bool(bad)):
+        for p in probs:
+            icon = {"bad": "🔴", "warn": "🟡", "ok": "🟢"}[p["level"]]
+            st.markdown(f"{icon} **{p['title']}**" + (f"  \n<small>{p['detail']}</small>" if p["detail"] else ""), unsafe_allow_html=True)
+        st.caption("These checks run every time you open this tab. A red or yellow line means something may not work the way your team expects.")
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Follow-ups scheduled", len(will), help=f"{paused_n} of the DIDs in the list are paused by an affiliate manager's answer")
-    k2.metric("Due in the next 24 hours", len(due))
-    k3.metric("Will be SKIPPED (DID retired)", len(skip), help="These DIDs were retired or deleted: no email will be sent")
-    k4.metric("Last live check of Ringba", ago(db.get_setting("numbers_live_checked_at") or db.get_setting("numbers_last_ok")) if (db.get_setting("numbers_live_checked_at") or db.get_setting("numbers_last_ok")) else "never")
+    k1.metric("🔴 Due in the next 24 hours", len(due), help="Emails the engine will send within 24 hours (or should have sent already). Pick 'Due in 24 hours' below to see them.")
+    k2.metric("⏸️ Paused by a manager", len(paused), help="An affiliate manager asked for more time. Nothing is sent until the pause ends; then a follow-up goes out ONLY if the DID still has no calls.")
+    k3.metric("🟢 Scheduled later", len(will) - len(due) - len(paused))
+    k4.metric("⛔ Will not be sent / nothing scheduled", len(notsent), help="Retired DIDs, DIDs that got a call, or answered with no pause.")
+    st.caption(f"Last live check of Ringba: {ago(live) if live else 'never'}. Times are shown in EST.")
     up_tab, hist_tab = st.tabs(["📅 Upcoming follow-ups", "🕘 Previous follow-ups"])
     with up_tab:
-        show_skip = st.checkbox("Also show DIDs that will be skipped (retired / never alert)", value=True, key="fu_skip")
-        shown = rows if show_skip else will
+        views = {"🔴 Due in 24 hours": due, "⏸️ Paused by a manager": paused, "📋 Everything": rows, "⛔ Will not be sent": notsent}
+        names = [f"{k} ({len(v)})" for k, v in views.items()]
+        if "fu_view" not in st.session_state:
+            st.session_state["fu_view"] = names[0] if due else names[2]
+        if st.session_state["fu_view"] not in names:            # the number in the name changed: keep the same view
+            st.session_state["fu_view"] = next((n for n in names if n.split(" (")[0] == str(st.session_state["fu_view"]).split(" (")[0]), names[2])
+        view = st.radio("Show", names, horizontal=True, key="fu_view")
+        shown = list(views.values())[names.index(view)]
+        shown = sorted(shown, key=lambda r: (r["next_followup"] is None, r["next_followup"] or now))
         if not shown:
-            st.info("No follow-up is scheduled right now.")
+            st.success("Nothing here. 🎉" if view.startswith("🔴") else "Nothing in this list right now.")
         else:
-            recs = [{"next_email": fmt(r["next_followup"]) if r["next_followup"] else "", "will_send": r["will_send"], "code": r["code"], "did": r["did"], "label": r["label"],
-                     "publisher": r["publisher"], "campaign": r["campaign"], "type": r["kind"], "what_happens": r["why"],
+            recs = [{"status": r["status"], "next_email": fmt(r["next_followup"]) if r["next_followup"] else "", "did": r["did"], "label": r["label"],
+                     "publisher": r["publisher"], "campaign": r["campaign"], "what_happens": r["why"],
                      "previous_response": r["previous_response"], "answered_by": r["responded_by"],
                      "answered_at": fmt(r["responded_at"]) if r["responded_at"] else "", "note": r["response_note"],
                      "paused_days": r["snoozed_days"], "last_email": fmt(r["last_email"]) if r["last_email"] else "",
-                     "followups_sent": r["followups_sent"], "did_status": r["did_status"]} for r in shown]
+                     "followups_sent": r["followups_sent"], "code": r["code"], "type": r["kind"], "did_status": r["did_status"]} for r in shown]
             df = pd.DataFrame(recs)
             show_df("followups", df, column_config={
-                "next_email": "Next email", "will_send": "Will it be sent?", "code": st.column_config.TextColumn("Alert code", help="The [#A..] code in the e-mail subject. Search it in the Alert Log to see the whole history."), "did": "DID", "label": "Label", "publisher": "Publisher", "campaign": "Campaign",
-                "type": "Alert type", "what_happens": "What happens", "previous_response": "AM's previous response", "answered_by": "Answered by",
+                "status": st.column_config.TextColumn("What is happening", width="large", help="🔴 due / overdue · 🟡 within 24 hours · 🟢 later · ⏸️ paused by a manager · ⛔ will not be sent"),
+                "next_email": "Next email (EST)", "did": "DID", "label": "Label", "publisher": "Publisher", "campaign": "Campaign",
+                "what_happens": st.column_config.TextColumn("What happens", width="large"),
+                "previous_response": st.column_config.TextColumn("AM's previous response", width="large"), "answered_by": "Answered by",
                 "answered_at": "Answered at", "note": "AM's note", "paused_days": st.column_config.NumberColumn("Paused for (days)", help="How many days the previous answer paused this DID"),
                 "last_email": "Last email sent", "followups_sent": st.column_config.NumberColumn("Follow-ups so far", help="Reminders / follow-ups already sent for this idle period"),
-                "did_status": "Current DID status"})
+                "code": st.column_config.TextColumn("Alert code", help="The [#A..] code in the e-mail subject. Search it in the Alert Log to see the whole history."),
+                "type": "Alert type", "did_status": "Current DID status"})
             st.markdown("**Preview of the next email**")
-            labels = [f"{r['did']}  {('(' + r['label'] + ') ') if r['label'] else ''}- {fmt(r['next_followup']) if r['next_followup'] else ''}" for r in shown]
+            labels = [f"{r['did']}  {('(' + r['label'] + ') ') if r['label'] else ''}- {fmt(r['next_followup']) if r['next_followup'] else 'no date'}" for r in shown]
             pick = st.selectbox("Choose a DID", range(len(shown)), format_func=lambda i: labels[i], key="fu_pick")
-            row = shown[pick]
-            if not row["will_send"] == "Yes":
-                st.warning(f"This email will NOT be sent: {row['will_send'][5:] if row['will_send'].startswith('No - ') else row['will_send']}.")
+            row = shown[min(pick, len(shown) - 1)]
+            st.info(row["status"])
             try:
                 subject, text, html = followups.preview(row, now)
                 st.markdown(f"**Subject:** {subject}")
