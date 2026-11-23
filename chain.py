@@ -80,7 +80,7 @@ def family_ids(alert_id):
     base = _base_of(r["dedupe_key"]) if r else None
     if base:
         like = base + ":%" if base.startswith("did:") else base + ":%"
-        more = db.q("SELECT id FROM alerts WHERE (dedupe_key = :b OR dedupe_key LIKE :l) AND dedupe_key NOT LIKE '%:cancelled'", b=base, l=like)
+        more = db.q("SELECT id FROM alerts WHERE (dedupe_key = :b OR dedupe_key LIKE :l) AND dedupe_key NOT LIKE :nc", b=base, l=like, nc="%:cancelled")
         for m in more:
             ids.add(m["id"])
         frontier = [m["id"] for m in more]
