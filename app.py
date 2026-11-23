@@ -1814,7 +1814,8 @@ def page_tasks():
     def draft_from_state():
         ss = st.session_state
         rep = ss.get("task_rep", "none")
-        rule = {"pick_weekdays": ss.get("task_wdays"), "pick_monthdays": ss.get("task_mdays"), "pick_dates": ss.get("task_dates")}.get(rep)
+        rule = {"pick_weekdays": ss.get("task_wdays"), "pick_monthdays": ss.get("task_mdays"), "pick_dates": ss.get("task_dates"),
+                "slots": ss.get("task_slots")}.get(rep)
         return rep, rule, {"title": ss.get("task_title"), "notes": ss.get(note_key) or "", "work_date": ss.get("task_wd"),
                            "alert_date": ss.get("task_ad"), "alert_time": ss.get("task_at"), "repeat": rep}
 
@@ -1828,7 +1829,7 @@ def page_tasks():
             late = tasks.alert_dt(row) <= db.now_utc()
             first = tasks.pdate(row["alert_date"])
             set_flash("flash_tasks", "ok", "Task added. " + ("Its alert time has already passed, so the e-mail goes out within 5 minutes."
-                      if late else f"First e-mail: {first:%a %d %b %Y} at {ss.get('task_at')}.") +
+                      if late else f"First e-mail: {first:%a %d %b %Y} at {tasks.fmt_time(row['alert_time'])}.") +
                       (f" It repeats: {tasks.repeat_label(rep, ss.get('task_rdays'), row['repeat_rule'])}." if rep != "none" else ""))
             ss["task_title"] = ""
             ss["task_ver"] = ss.get("task_ver", 0) + 1          # a fresh, empty details box
@@ -1856,6 +1857,12 @@ def page_tasks():
                      help="When you tick Done, a repeating task moves to its next date and the alert comes again.")
         with st.expander("Repeat options (only if you chose a repeat above)"):
             st.caption("Only the option that matches your **Repeat** choice is used.")
+            st.text_area("Several alert times in a circle (choose Repeat = 'Several alert times in a circle')", key="task_slots",
+                         value="Mon 10:00 AM\nFri 03:00 PM", height=110,
+                         help="One alert time per line (or separated by commas): a weekday or a day of the month, then the time. "
+                              "Examples: Mon 10:00 AM  |  Sun 10am  |  15 03:00 AM  |  last 09:00 PM. "
+                              "When you tick Done, only the alert that just came moves on: Mon -> Fri -> Mon -> ... (a circle). "
+                              "The Work date / Alert date / Alert time boxes above are not used for this repeat: the first alert is the next time of the circle.")
             r1, r2 = st.columns(2)
             r1.number_input("Every N days: how many days?", 1, 365, 7, key="task_rdays")
             r2.multiselect("Chosen weekdays: which days?", tasks.WD_NAMES, default=["Mon"], key="task_wdays",
@@ -1919,7 +1926,8 @@ def page_tasks():
                "Alert time": st.column_config.SelectboxColumn("Alert time", options=opts, required=True),
                "Repeat": st.column_config.SelectboxColumn("Repeat", options=list(tasks.REPEAT_SHORT.values()), required=True),
                "Repeat details": st.column_config.TextColumn("Repeat details", help="Every N days: the number. Chosen weekdays: Mon, Tue. "
-                                                             "Chosen month days: 15, 20, last. Chosen dates: 2026-12-01, 2026-12-15."),
+                                                             "Chosen month days: 15, 20, last. Chosen dates: 2026-12-01, 2026-12-15. "
+                                                             "Several times (circle): Mon 10:00 AM, Fri 03:00 PM, 15 03:00 AM."),
                "Remove": st.column_config.CheckboxColumn("Remove", width="small", help="Deletes the task (the history stays)")}
         order, cfg = view_controls("tasks", df, cfg)                     # same "Arrange columns / column width" box as the other tables
         styled = df.style.apply(lambda r: [{"🔴": "background-color: rgba(255,75,75,0.18)", "🟠": "background-color: rgba(255,170,0,0.18)"}
@@ -1949,7 +1957,7 @@ def page_tasks():
                         if not det.isdigit() or int(det) < 1:
                             raise ValueError("Repeat details: type how many days, like 4.")
                         kw["repeat_days"] = int(det)
-                    elif rep_k in tasks.PICK:
+                    elif rep_k in tasks.PICK or rep_k == "slots":
                         kw["repeat_rule"] = det
                     if tasks.update_task(tid, title=n["Task"],
                                          work_date=n["Work date"] if pd.notna(n["Work date"]) else None,

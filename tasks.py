@@ -8,16 +8,17 @@ from zoneinfo import ZoneInfo
 import alerts
 import db
 
-REPEATS = ["none", "daily", "weekdays", "weekly", "monthly", "custom", "pick_weekdays", "pick_monthdays", "pick_dates"]
+REPEATS = ["none", "daily", "weekdays", "weekly", "monthly", "custom", "pick_weekdays", "pick_monthdays", "pick_dates", "slots"]
 REPEAT_LABEL = {"none": "Does not repeat", "daily": "Every day", "weekdays": "Every weekday (Mon-Fri)",
                 "weekly": "Every week", "monthly": "Every month", "custom": "Every N days (you choose N)",
                 "pick_weekdays": "On the weekdays I choose (e.g. every Monday and Tuesday)",
                 "pick_monthdays": "On the days of the month I choose (e.g. the 15th and 20th)",
-                "pick_dates": "On the exact dates I choose"}
+                "pick_dates": "On the exact dates I choose",
+                "slots": "Several alert times in a circle (e.g. Mon 10 AM, then Fri 3 PM, then Mon again)"}
 REPEAT_SHORT = {"none": "No repeat", "daily": "Every day", "weekdays": "Mon-Fri", "weekly": "Every week", "monthly": "Every month",
-                "custom": "Every N days", "pick_weekdays": "Chosen weekdays", "pick_monthdays": "Chosen month days", "pick_dates": "Chosen dates"}
+                "custom": "Every N days", "pick_weekdays": "Chosen weekdays", "pick_monthdays": "Chosen month days", "pick_dates": "Chosen dates", "slots": "Several times (circle)"}
 PICK = ("pick_weekdays", "pick_monthdays", "pick_dates")
-REPEATING = ("daily", "weekdays", "weekly", "monthly", "custom") + PICK
+REPEATING = ("daily", "weekdays", "weekly", "monthly", "custom", "slots") + PICK
 WD_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 MONTH_DAY_CHOICES = [str(i) for i in range(1, 32)] + ["last"]
 
@@ -58,8 +59,153 @@ def parse_rule(repeat, value):
     return ",".join(sorted(ds))
 
 
+# ---- several alert times for ONE task, run as a circle:  "Mon 10:00 AM, Fri 03:00 PM, 15 03:00 AM"
+# Each line is one slot (a weekday or a day of the month + a time). When you tick Done, ONLY the slot that just alerted moves on:
+# the task waits for the next slot of the circle (Mon -> Fri -> Mon ...).
+import json as _json
+import re as _re0
+
+_TIME_LOOSE = _re0.compile(r"^(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$", _re0.I)
+
+
+def _time_loose(v):
+    """'10am', '3 PM', '03:00 PM', '15:30' -> '15:00' (24h) or None."""
+    m = _TIME_LOOSE.match(str(v or "").strip())
+    if not m:
+        return None
+    h, mi, ap = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower()
+    if ap:
+        if not 1 <= h <= 12:
+            return None
+        h = h % 12 + (12 if ap == "pm" else 0)
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        return None
+    return f"{h:02d}:{mi:02d}"
+
+
+def parse_slots(value):
+    """Text ('Mon 10:00 AM, Fri 3pm, 15 3:00 AM, last 9pm' - commas or new lines), a JSON text or a list of dicts -> the saved JSON text.
+    Raises ValueError with a plain message."""
+    items = []
+    if isinstance(value, (list, tuple)):
+        items = [x for x in value if isinstance(x, dict)]
+    else:
+        txt = str(value or "").strip()
+        if txt.startswith("["):
+            try:
+                items = [x for x in _json.loads(txt) if isinstance(x, dict)]
+            except ValueError:
+                raise ValueError("The alert times are not readable. Write them like: Mon 10:00 AM, Fri 03:00 PM")
+        else:
+            names = [n.lower() for n in WD_NAMES]
+            for part in _re0.split(r"[,;\n]+", txt):
+                part = part.strip()
+                if not part:
+                    continue
+                bits = part.split(None, 1)
+                if len(bits) < 2:
+                    raise ValueError(f"'{part}': write the day and the time, like Mon 10:00 AM or 15 03:00 AM.")
+                day, tm = bits[0].lower().strip("."), bits[1]
+                t = _time_loose(tm)
+                if not t:
+                    raise ValueError(f"'{part}': '{tm}' is not a time. Use like 10:00 AM or 3pm.")
+                if day[:3] in names and not day.isdigit():
+                    items.append({"k": "w", "d": names.index(day[:3]), "t": t})
+                elif day in ("last", "end"):
+                    items.append({"k": "m", "d": 99, "t": t})
+                elif _re0.match(r"^\d{1,2}(st|nd|rd|th)?$", day) and 1 <= int(_re0.match(r"^\d{1,2}", day).group()) <= 31:
+                    items.append({"k": "m", "d": int(_re0.match(r"^\d{1,2}", day).group()), "t": t})
+                else:
+                    raise ValueError(f"'{day}' is not a weekday (Mon, Tue ...) or a day of the month (1 to 31, or last).")
+    out, seen = [], set()
+    for it in items:
+        k, d, t = it.get("k"), it.get("d"), parse_time(it.get("t"))
+        if k not in ("w", "m") or t is None or not isinstance(d, int) or (k == "w" and not 0 <= d <= 6) or (k == "m" and not (1 <= d <= 31 or d == 99)):
+            raise ValueError("One of the alert times is not valid. Write them like: Mon 10:00 AM, Fri 03:00 PM")
+        if (k, d, t) not in seen:
+            seen.add((k, d, t))
+            out.append({"k": k, "d": d, "t": t})
+    if not out:
+        raise ValueError("Write at least one alert time, like: Mon 10:00 AM")
+    if len(out) > 30:
+        raise ValueError("Please use 30 alert times or fewer.")
+    out.sort(key=lambda x: (0 if x["k"] == "w" else 1, x["d"], x["t"]))
+    return _json.dumps(out, separators=(",", ":"))
+
+
+def slots_text(rule):
+    """The saved slots in plain words (and in the same format you can type): 'Mon 10:00 AM, Fri 03:00 PM, 15 03:00 AM'."""
+    try:
+        items = _json.loads(rule or "[]")
+    except ValueError:
+        return ""
+    parts = []
+    for x in items:
+        day = WD_NAMES[x["d"]] if x["k"] == "w" else ("last" if x["d"] == 99 else str(x["d"]))
+        parts.append(f"{day} {fmt_time(x['t'])}")
+    return ", ".join(parts)
+
+
+def _slot_hits(x, d):
+    if x["k"] == "w":
+        return d.weekday() == x["d"]
+    last = calendar.monthrange(d.year, d.month)[1]
+    return d.day == (last if x["d"] == 99 else min(x["d"], last))
+
+
+def next_slot_dt(rule, after):
+    """The first alert time of the circle that is later than `after` (an aware datetime). Returns an aware datetime in YOUR time zone, or None."""
+    items = _json.loads(rule) if isinstance(rule, str) else list(rule or [])
+    tz = local_tz()
+    start = after.astimezone(tz).date()
+    best = None
+    for off in range(0, 400):
+        d = start + timedelta(days=off)
+        for x in items:
+            if _slot_hits(x, d):
+                hh, mm = x["t"].split(":")
+                c = datetime(d.year, d.month, d.day, int(hh), int(mm), tzinfo=tz)
+                if c > after and (best is None or c < best):
+                    best = c
+        if best is not None:
+            return best
+    return None
+
+
+def _occurrence_fields(dt):
+    return {"work_date": iso(dt.date()), "alert_date": iso(dt.date()), "alert_time": dt.strftime("%H:%M")}
+
+
+def advance_slots(now=None):
+    """A slot that was alerted but never ticked Done is left behind when the NEXT slot of the circle arrives: the task moves on to that slot
+    and alerts again (so Friday's alert is not lost because Monday was never ticked). Returns how many tasks moved."""
+    now = now or db.now_utc()
+    moved = 0
+    for t in db.q("SELECT * FROM tasks WHERE status='open' AND repeat='slots' AND alert_count > 0"):
+        try:
+            cur = alert_dt(t)
+            nxt = next_slot_dt(t["repeat_rule"], cur) if cur else None
+        except Exception:
+            continue
+        if nxt is None or nxt > now:
+            continue
+        while True:                                   # several slots passed: go to the latest one that has come
+            after = next_slot_dt(t["repeat_rule"], nxt)
+            if after is None or after > now:
+                break
+            nxt = after
+        f = _occurrence_fields(nxt)
+        db.x("UPDATE tasks SET work_date=:w, alert_date=:a, alert_time=:t, alert_count=0, last_alert_at=NULL, updated_at=:n WHERE id=:i",
+             w=f["work_date"], a=f["alert_date"], t=f["alert_time"], n=db.now_utc(), i=t["id"])
+        log(t["id"], t["title"], "slot moved", f"not ticked Done; the next alert time of the circle came: {nxt:%a %d %b %Y, %I:%M %p}")
+        moved += 1
+    return moved
+
+
 def rule_text(repeat, rule):
     """The saved rule in plain words: 'Mon, Tue' / '15, 20, last' / '2026-12-01, 2026-12-15'."""
+    if repeat == "slots":
+        return slots_text(rule)
     items = [x for x in str(rule or "").split(",") if x]
     if repeat == "pick_weekdays":
         return ", ".join(WD_NAMES[int(i)] for i in items)
@@ -179,7 +325,13 @@ def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", al
     if repeat not in REPEATS:
         repeat = "none"
     rule = None
-    if repeat in PICK:
+    if repeat == "slots":
+        rule = parse_slots(repeat_rule)
+        floor = datetime(wd.year, wd.month, wd.day, tzinfo=local_tz()) - timedelta(seconds=1)
+        first_dt = next_slot_dt(rule, max(floor, now or db.now_utc()))
+        wd = ad = first_dt.date()
+        alert_time = first_dt.strftime("%H:%M")           # the first alert is the next time of the circle
+    elif repeat in PICK:
         rule = parse_rule(repeat, repeat_rule)
         first = first_on_or_after(repeat, rule, wd)
         if first is None:
@@ -202,6 +354,8 @@ def default_time():
 def repeat_label(repeat, days=None, rule=None):
     if repeat == "custom":
         return f"Every {int(days or 1)} day(s)"
+    if repeat == "slots":
+        return "Circle: " + slots_text(rule).replace(", ", "  ->  ")
     if repeat in PICK:
         return {"pick_weekdays": "Every ", "pick_monthdays": "On day ", "pick_dates": "On "}[repeat] + rule_text(repeat, rule)
     return REPEAT_LABEL.get(repeat, repeat)
@@ -231,7 +385,7 @@ def update_task(task_id, **new):
             v = max(int(v), 1) if v not in (None, "") else None
         elif f == "repeat_rule":
             eff = new.get("repeat") or old["repeat"]
-            v = parse_rule(eff, v) if eff in PICK else None
+            v = parse_slots(v) if eff == "slots" else (parse_rule(eff, v) if eff in PICK else None)
         elif f == "notes":
             v = clean_note(v)
         else:
@@ -251,9 +405,17 @@ def update_task(task_id, **new):
             params[f] = v
     eff_rep = params.get("repeat", old["repeat"])
     eff_rule = params.get("repeat_rule", old["repeat_rule"])
-    if eff_rep in PICK and not eff_rule:
-        raise ValueError("Choose the days for this repeat.")
-    if eff_rep not in PICK and old["repeat_rule"] and "repeat_rule" not in params:
+    if (eff_rep in PICK or eff_rep == "slots") and not eff_rule:
+        raise ValueError("Choose the days for this repeat." if eff_rep != "slots" else "Write at least one alert time, like: Mon 10:00 AM")
+    if eff_rep == "slots" and ("repeat_rule" in params or "repeat" in params):
+        f = _occurrence_fields(next_slot_dt(eff_rule, db.now_utc()))     # the schedule changed: the task waits for the next time of the new circle
+        for k, v in f.items():
+            if params.get(k, old[k]) != v:
+                params[k] = v
+                if f"{k}=:{k}" not in sets:
+                    sets.append(f"{k}=:{k}")
+        changes.append(f"work_date: next alert time of the circle {f['alert_date']} {f['alert_time']}")
+    if eff_rep not in PICK and eff_rep != "slots" and old["repeat_rule"] and "repeat_rule" not in params:
         sets.append("repeat_rule=NULL")                 # switched to a normal repeat: forget the chosen days
     if eff_rep in PICK and eff_rule and sets:
         wd = pdate(params.get("work_date", old["work_date"]))
@@ -308,6 +470,14 @@ def mark_done(task_id, now=None):
     if not t or t["status"] == "done":
         return
     n = db.now_utc() if now is None else now
+    if t["repeat"] == "slots":                            # ONLY the slot that just alerted moves on; the next time of the circle is next
+        cur = alert_dt(t) or n
+        nxt = next_slot_dt(t["repeat_rule"], max(cur, n))
+        f = _occurrence_fields(nxt)
+        db.x("UPDATE tasks SET work_date=:w, alert_date=:a, alert_time=:t, alert_count=0, last_alert_at=NULL, updated_at=:n WHERE id=:i",
+             w=f["work_date"], a=f["alert_date"], t=f["alert_time"], n=n, i=task_id)
+        log(task_id, t["title"], "done", f"circle: next alert {nxt:%a %d %b %Y, %I:%M %p}")
+        return
     if t["repeat"] in REPEATING:
         wd = pdate(t["work_date"]) or today(now)
         ad = pdate(t["alert_date"]) or wd
@@ -810,6 +980,7 @@ def run_alerts(now=None):
     now = now or db.now_utc()
     firsts, follows = [], []
     fm, fmax, quiet = followup_minutes(), followup_max(), None
+    advance_slots(now)
     for t in open_tasks():
         adt = alert_dt(t)
         if adt is None or adt > now:
