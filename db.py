@@ -34,7 +34,7 @@ SETTING_DEFAULTS = {
     "pubcaps_sync_minutes": "60",  # how often publisher caps are re-read from the Ringba campaigns
     "tasks_digest_on": "false",    # My Tasks: an extra morning summary of the whole list (the real-time alerts are separate)
     "tasks_default_time": "09:00", # alert time used when a task has none
-    "tasks_followup_minutes": "30",# still not done after this many minutes -> follow-up e-mail (0 = no follow-ups)
+    "tasks_followup_minutes": "15",# still not done after this many minutes -> follow-up e-mail (0 = no follow-ups)
     "tasks_followup_max": "10",    # at most this many follow-ups per task alert
     "tasks_quiet_from": "23:00",   # no FOLLOW-UP e-mails between these two times (first alerts always go)
     "tasks_quiet_to": "06:00",

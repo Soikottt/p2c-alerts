@@ -609,11 +609,23 @@ def alert_dt(t):
     return datetime(d.year, d.month, d.day, int(hh), int(mm), tzinfo=local_tz())
 
 
+_mig = {"done": False}
+
+
 def followup_minutes():
+    if not _mig["done"]:
+        _mig["done"] = True
+        try:        # one time: the old default (30 minutes) becomes 15. A number you chose yourself is never changed.
+            if db.get_setting("tasks_followup_15", "") != "1":
+                db.set_setting("tasks_followup_15", "1")
+                if str(db.get_setting("tasks_followup_minutes", "30")).strip() in ("30", ""):
+                    db.set_setting("tasks_followup_minutes", "15")
+        except Exception:
+            pass
     try:
-        return max(int(float(db.get_setting("tasks_followup_minutes", "30") or 0)), 0)
+        return max(int(float(db.get_setting("tasks_followup_minutes", "15") or 0)), 0)
     except ValueError:
-        return 30
+        return 15
 
 
 def followup_max():
@@ -972,6 +984,96 @@ def _send_group(items, now, heading, followup, key):
     for t in items:
         log(t["id"], t["title"], "follow-up sent" if followup else "alert sent", f"#{(t['alert_count'] or 0) + 1}")
     return len(items)
+
+
+# ------------------------------------------------------------------ the "Schedule" page: everything that is coming, and what already happened
+def _future_occurrences(t, count):
+    """The alert times AFTER the current one for a repeating task (aware datetimes, your time zone)."""
+    cur = alert_dt(t)
+    if cur is None or t["repeat"] not in REPEATING:
+        return []
+    out = []
+    if t["repeat"] == "slots":
+        c = cur
+        for _ in range(count):
+            c = next_slot_dt(t["repeat_rule"], c)
+            if c is None:
+                break
+            out.append(c)
+        return out
+    wd = pdate(t["work_date"])
+    ad = pdate(t["alert_date"]) or wd
+    off = (wd - ad) if wd and ad else timedelta(0)
+    hh, mm = (parse_time(t.get("alert_time")) or default_time()).split(":")
+    d = wd
+    for _ in range(count):
+        if t["repeat"] in PICK:
+            d = next_after(t["repeat"], t["repeat_rule"], d)
+        else:
+            d = next_work_date(wd, t["repeat"], d, t["repeat_days"])
+        if d is None:
+            break
+        a = d - off
+        out.append(datetime(a.year, a.month, a.day, int(hh), int(mm), tzinfo=local_tz()))
+    return out
+
+
+def upcoming_alerts(now=None, days=14, per_task=12):
+    """Every task e-mail that will go out in the next `days` days, oldest first:
+    [{'when' (aware), 'kind', 'task_id', 'title', 'detail'}]. Includes the follow-ups of tasks you have not ticked Done."""
+    now = now or db.now_utc()
+    until = now + timedelta(days=days)
+    fm, fmax = followup_minutes(), followup_max()
+    out = []
+    for t in open_tasks():
+        n = t["alert_count"] or 0
+        rep = repeat_label(t["repeat"], t["repeat_days"], t["repeat_rule"]) if t["repeat"] != "none" else "does not repeat"
+        adt = alert_dt(t)
+        if n > 0:
+            last = db.to_dt(t["last_alert_at"]) if t["last_alert_at"] else None
+            if fm and last and not (fmax and n - 1 >= fmax):
+                due = max(last + timedelta(minutes=fm), now)
+                k = n
+                while due <= until and k < (fmax + 1 if fmax else n + 8):
+                    out.append({"when": due.astimezone(local_tz()), "kind": f"Follow-up #{k} (not ticked Done)", "task_id": t["id"], "title": t["title"],
+                                "detail": f"Repeats every {fm} min until you tick Done (waits during quiet hours)" if k == n else "if still not done"})
+                    due += timedelta(minutes=fm)
+                    k += 1
+                    if k - n >= 3:
+                        break                         # three follow-ups ahead are enough to see
+            if t["repeat"] == "slots" and adt:        # the circle moves on by itself when its next time comes
+                nx = next_slot_dt(t["repeat_rule"], adt)
+                if nx and nx.astimezone(timezone_utc()) <= until:
+                    out.append({"when": nx, "kind": "Task alert (next time of the circle)", "task_id": t["id"], "title": t["title"], "detail": rep})
+                if nx:
+                    for c in _future_occurrences({**t, "work_date": iso(nx.date()), "alert_date": iso(nx.date()), "alert_time": nx.strftime("%H:%M")}, per_task):
+                        if c.astimezone(timezone_utc()) <= until:
+                            out.append({"when": c, "kind": "Task alert (circle)", "task_id": t["id"], "title": t["title"], "detail": rep})
+            continue
+        if adt is None:
+            continue
+        times = [adt] + _future_occurrences(t, per_task)
+        for i, c in enumerate(times):
+            if c.astimezone(timezone_utc()) > until:
+                break
+            out.append({"when": max(c, now.astimezone(local_tz())) if i == 0 else c,
+                        "kind": "Task alert" if i == 0 else "Task alert (repeat)", "task_id": t["id"], "title": t["title"],
+                        "detail": rep + (" - due now, goes out within 5 minutes" if i == 0 and c <= now else "")})
+    out.sort(key=lambda r: (r["when"], r["task_id"]))
+    return out
+
+
+def timezone_utc():
+    from datetime import timezone
+    return timezone.utc
+
+
+def history(limit=300):
+    """What already happened to the tasks, newest first: [{'when','task','event','detail'}] (from the permanent task history)."""
+    label = {"created": "Task created", "alert sent": "Alert e-mail sent", "follow-up sent": "Follow-up e-mail sent", "done": "Ticked Done",
+             "changed": "Changed", "reopened": "Reopened", "deleted": "Deleted", "slot moved": "Circle moved on (not ticked Done)"}
+    return [{"when": db.to_dt(r["at"]), "task": r["task_title"], "event": label.get(r["event"], r["event"]), "detail": r["detail"] or "", "task_id": r["task_id"]}
+            for r in db.q("SELECT task_id, task_title, at, event, detail FROM task_log ORDER BY id DESC LIMIT :n", n=int(limit))]
 
 
 def run_alerts(now=None):

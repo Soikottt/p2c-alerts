@@ -2267,7 +2267,64 @@ def tasks_tz_now():
     return tasks.local_now().strftime("%a %d %b %Y, %I:%M:%S %p") + f" ({db.get_setting('tasks_timezone', 'Asia/Dhaka')})"
 
 
-PAGES = {"📊 Dashboard": page_dashboard, "🎛️ Cap overview": page_cap_overview, "📅 Follow-ups": page_followups, "📑 Reports": page_reports, "🧑‍💼 Publishers": page_publishers,
+def page_schedule():
+    """One place to see everything that is coming (tasks, task follow-ups, DID follow-ups) and what already happened."""
+    import followups
+    import tasks
+    now = db.now_utc()
+    ln = tasks.local_now(now)
+    st.caption(f"Everything that will be e-mailed to you, so you can be ready before it comes. It is **{ln:%A %d %b %Y, %I:%M %p}** now "
+               f"({db.get_setting('tasks_timezone', 'Asia/Dhaka')}). Task follow-ups come every {tasks.followup_minutes()} minutes until you tick Done "
+               "(change it in My Tasks > E-mail settings).")
+    c1, c2 = st.columns([1, 3])
+    days = c1.selectbox("Look ahead", [1, 3, 7, 14, 30], index=2, format_func=lambda d: f"{d} day(s)", key="sched_days")
+    rows = [{"when": r["when"], "type": r["kind"], "what": r["title"], "details": r["detail"], "code": f"task #{r['task_id']}"}
+            for r in tasks.upcoming_alerts(now, days=days)]
+    try:
+        for r in followups.upcoming(now):
+            if r.get("scheduled") and r["next_followup"] and r["will_send"] == "Yes" and r["next_followup"] <= now + timedelta(days=days):
+                rows.append({"when": r["next_followup"].astimezone(tasks.local_tz()), "type": "DID follow-up: " + r["kind"],
+                             "what": f"{r['did']} - {r['publisher']}", "details": r["why"], "code": r.get("code", "")})
+    except Exception as e:
+        st.warning(f"The DID follow-ups could not be loaded now: {str(e)[:120]}")
+    rows.sort(key=lambda r: r["when"])
+    end_today = ln.replace(hour=23, minute=59, second=59)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("In the next hour", sum(1 for r in rows if r["when"] <= ln + timedelta(hours=1)))
+    k2.metric("Today", sum(1 for r in rows if r["when"] <= end_today))
+    k3.metric("Next 24 hours", sum(1 for r in rows if r["when"] <= ln + timedelta(hours=24)))
+    k4.metric(f"Next {days} day(s)", len(rows))
+    t_up, t_prev = st.tabs(["⏭️ Upcoming alerts", "🕘 Previous (what already happened)"])
+    with t_up:
+        if not rows:
+            st.info("Nothing is scheduled in this time.")
+        else:
+            def _in(w):
+                m = int((w - ln).total_seconds() // 60)
+                if m <= 0:
+                    return "now / next run"
+                return (f"{m // 1440}d " if m >= 1440 else "") + (f"{(m % 1440) // 60}h " if m >= 60 else "") + f"{m % 60}m"
+            df = pd.DataFrame([{"when": r["when"].strftime("%a %d %b %Y, %I:%M %p"), "in": _in(r["when"]), "type": r["type"], "what": r["what"],
+                                "details": r["details"], "code": r["code"]} for r in rows])
+            show_df("sched_up", df, column_config={"when": "When (your time)", "in": "Comes in", "type": "Type", "what": st.column_config.TextColumn("What", width="large"),
+                                                   "details": st.column_config.TextColumn("Details", width="large"), "code": "Task / alert code"})
+    with t_prev:
+        h = tasks.history(300)
+        try:
+            for r in followups.history(100):
+                h.append({"when": r["when"], "task": f"{r['did']}", "event": "DID e-mail: " + r["kind"], "detail": f"{r['code']} - {r.get('response') or r.get('email_status') or ''}", "task_id": ""})
+        except Exception:
+            pass
+        h.sort(key=lambda r: r["when"] or now, reverse=True)
+        if not h:
+            st.info("Nothing yet.")
+        else:
+            df = pd.DataFrame([{"when": tasks.fmt_dt(r["when"]), "task": r["task"], "event": r["event"], "details": r["detail"]} for r in h])
+            show_df("sched_prev", df, column_config={"when": "When (your time)", "task": st.column_config.TextColumn("Task / DID", width="large"),
+                                                     "event": "What happened", "details": st.column_config.TextColumn("Details", width="large")})
+
+
+PAGES = {"📊 Dashboard": page_dashboard, "🎛️ Cap overview": page_cap_overview, "📅 Follow-ups": page_followups, "🗓️ Schedule": page_schedule, "📑 Reports": page_reports, "🧑‍💼 Publishers": page_publishers,
          "🏢 Buyers": page_buyers, "📞 DIDs": page_dids, "🚦 Caps": page_caps, "✅ My Tasks": page_tasks, "✉️ Emails": page_emails,
          "📝 Email templates": page_templates, "📜 Alert Log": page_log, "🔄 Sync & Import": page_sync,
          "⚙️ Settings": page_settings}
