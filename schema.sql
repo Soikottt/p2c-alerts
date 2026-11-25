@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS affiliate_managers (
   id SERIAL PRIMARY KEY,
   name TEXT NOT NULL,
   email TEXT NOT NULL,
-  active BOOLEAN NOT NULL DEFAULT TRUE
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  all_alerts BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS publishers (
@@ -234,6 +235,7 @@ CREATE TABLE IF NOT EXISTS targets (
   count_day INTEGER,
   count_month INTEGER,
   count_total INTEGER,
+  watchlist BOOLEAN NOT NULL DEFAULT FALSE,
   counts_at TIMESTAMPTZ,
   synced_at TIMESTAMPTZ
 );
@@ -253,7 +255,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   repeat_days INTEGER,
   repeat_rule TEXT,
   last_alert_at TIMESTAMPTZ,
-  alert_count INTEGER NOT NULL DEFAULT 0
+  alert_count INTEGER NOT NULL DEFAULT 0,
+  cc_emails TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_log (

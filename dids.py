@@ -282,6 +282,13 @@ def cap_has_active_did(cap, links=None):
     return any((pid, k) in pairs for k in keys) or (pid, "*") in pairs
 
 
+def connected_last_30d(now=None):
+    """Calls of the last 30 days that connected to a buyer, per DID (one grouped query)."""
+    since = (now or db.now_utc()) - timedelta(days=30)
+    return {r["did_id"]: r["n"] for r in db.q("SELECT did_id, COUNT(*) AS n FROM calls WHERE did_id IS NOT NULL AND call_at >= :s "
+                                              "AND connected = TRUE AND buyer_id IS NOT NULL GROUP BY did_id", s=since)}
+
+
 def calls_last_30d(now=None):
     since = (now or db.now_utc()) - timedelta(days=30)
     return {r["did_id"]: r["n"] for r in db.q("SELECT did_id, COUNT(*) AS n FROM calls WHERE did_id IS NOT NULL AND call_at >= :s "

@@ -287,7 +287,8 @@ def view_controls(name, df, column_config):
     for c, px in widths.items():
         if c in order:
             base = cfg.get(c)
-            cfg[c] = {**base, "width": px} if isinstance(base, dict) else st.column_config.Column(width=px)
+            cfg[c] = (st.column_config.Column(base, width=px) if isinstance(base, str)
+                      else {**base, "width": px} if isinstance(base, dict) else st.column_config.Column(width=px))
     return order, cfg
 
 
@@ -307,6 +308,7 @@ def table_editor(name, df, column_config, display_cols, table, transform=None, r
         edited = st.data_editor(df, key=f"ed_{name}_{ver}_{fsig}", column_config=column_config, hide_index=True, column_order=order,
                                 num_rows="dynamic" if dynamic else "fixed", disabled=list(disabled))
         submitted = st.form_submit_button("💾 Save changes")
+    csv_button(name, df)
     if submitted:
         st.session_state[f"msg_{name}"] = save_table(table, df, edited, display_cols, pk=pk, transform=transform,
                                                      required=required, allow_delete=allow_delete,
@@ -367,10 +369,28 @@ def filter_bar(name, df, skip=(), max_unique=40):
     return out.reset_index(drop=True), sig
 
 
+def csv_button(name, df, label="⬇️ Download CSV"):
+    """CSV of the table exactly as filtered on screen (all rows, all columns)."""
+    if df is None or len(df) == 0:
+        return
+    try:
+        data = df.drop(columns=[c for c in df.columns if str(c).startswith("_")]).to_csv(index=False)
+    except Exception:
+        data = df.to_csv(index=False)
+    st.download_button(f"{label} ({len(df):,} rows)", data, f"{name}.csv", "text/csv", key=f"dlcsv_{name}")
+
+
 def show_df(name, df, **kw):
-    """st.dataframe with the search / filter bar above it."""
+    """st.dataframe with the search / filter bar, the 'Arrange columns' box and a CSV download."""
     df2, _ = filter_bar(name, df)
+    cfg = kw.pop("column_config", None) or {}
+    kw.pop("column_order", None)
+    if df2 is not None and len(df2.columns):
+        order, cfg = view_controls(name, df2, cfg)
+        kw["column_order"] = order
+    kw["column_config"] = cfg
     st.dataframe(df2, hide_index=True, **kw)
+    csv_button(name, df2)
     return df2
 
 
@@ -629,7 +649,7 @@ def page_reports():
             bad_rows = res[res["Result"] != "✅ match"]
             st.caption(f"{len(res) - len(bad_rows)} publishers match, {len(bad_rows)} differ. If the tool is LOWER, load the missing days "
                        "(next box). If the day totals look shifted, check the timezone in Settings.")
-            st.dataframe(res, hide_index=True)
+            show_df("recon", res)
             st.download_button("⬇️ Download comparison", res.to_csv(index=False), "comparison.csv", "text/csv", key="dl_recon")
     with st.expander("🩺 Check for missing or incomplete days"):
         st.caption("Looks for days with no calls, 25 calls or fewer, or far below a normal day (for example days loaded before the "
@@ -676,8 +696,8 @@ def page_reports():
     with t_raw:
         raw = df.drop(columns=["day"]).copy()
         raw["call_at"] = raw["call_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
-        st.caption(f"Showing the newest 2,000 of {len(raw):,} calls. The download has all of them.")
-        show_df("rep_raw", raw.tail(2000).iloc[::-1].reset_index(drop=True))
+        st.caption(f"All {len(raw):,} calls, newest first.")
+        show_df("rep_raw", raw.iloc[::-1].reset_index(drop=True))
         st.download_button("⬇️ Download all calls CSV", raw.to_csv(index=False), f"calls_{a}_{b}.csv", "text/csv", key="dl_raw")
 
 
@@ -764,6 +784,61 @@ def page_publishers():
 
 # ================================================================== BUYERS
 def page_buyers():
+    t_buy, t_tg = st.tabs(["🏢 Buyers (buyer watchlist)", "🎯 Target watchlist"])
+    with t_buy:
+        _buyers_table()
+    with t_tg:
+        _target_watchlist()
+
+
+def _target_watchlist():
+    st.caption("Tick **Watchlist** on a target to get an email every time a call CONNECTS to that target. Only **active targets** "
+               "of **active buyers** are listed. Targets come from Ringba (they refresh by themselves). The e-mail shows the target name, "
+               "the target ID and the buyer.")
+    since = db.now_utc() - timedelta(days=30)
+    rows = db.q("""SELECT t.id, t.ringba_target_id AS target_id, t.name, COALESCE(t.buyer_name, b.name) AS buyer, t.watchlist
+                   FROM targets t LEFT JOIN buyers b ON b.id = t.buyer_id
+                   WHERE t.active = TRUE AND (t.buyer_id IS NULL OR COALESCE(b.status, 'active') = 'active')
+                   ORDER BY buyer, t.name""")
+    stat = {}
+    for r in db.q("""SELECT LOWER(TRIM(target_name)) AS k, COUNT(*) AS n, SUM(CASE WHEN connected THEN 1 ELSE 0 END) AS conn,
+                            MAX(call_at) AS last_call FROM calls WHERE call_at >= :s AND target_name IS NOT NULL
+                     GROUP BY LOWER(TRIM(target_name))""", s=since):
+        stat[r["k"]] = r
+    names = {}
+    for r in rows:
+        names[(r["name"] or "").strip().lower()] = names.get((r["name"] or "").strip().lower(), 0) + 1
+    for r in rows:
+        k = (r["name"] or "").strip().lower()
+        r["calls_30d"] = int((stat.get(k) or {}).get("n") or 0)
+        r["connected_30d"] = int((stat.get(k) or {}).get("conn") or 0)
+        lc = (stat.get(k) or {}).get("last_call")
+        r["last_call"] = fmt(lc) if lc else "none in 30d"
+    if not rows:
+        st.info("No active targets yet. They appear after the engine reads your Ringba targets (Caps page, target caps).")
+        return
+    dup = [n for n, c in names.items() if c > 1]
+    if dup:
+        st.warning("Two active targets share the same name (" + ", ".join(dup[:5]) + "). Calls only carry the target name, so both are "
+                   "matched by that name. Give them different names in Ringba to tell them apart.")
+    cols = ["id", "target_id", "name", "buyer", "watchlist", "calls_30d", "connected_30d", "last_call"]
+    df = frame(rows, cols)
+    df["watchlist"] = df["watchlist"].fillna(False).astype(bool)
+    n_on = int(df["watchlist"].sum())
+    st.caption(f"{n_on} of {len(df)} active targets are on the watchlist.")
+
+    def tf(v):
+        return {"watchlist": bool(v["watchlist"])}
+
+    cfg = {"id": None, "target_id": st.column_config.TextColumn("Target ID"), "name": st.column_config.TextColumn("Target name"),
+           "buyer": st.column_config.TextColumn("Buyer"), "watchlist": st.column_config.CheckboxColumn("⭐ Watchlist"),
+           "calls_30d": st.column_config.NumberColumn("Calls 30d"), "connected_30d": st.column_config.NumberColumn("Connected 30d"),
+           "last_call": st.column_config.TextColumn("Last call")}
+    table_editor("tgwatch", df, cfg, ["watchlist"], "targets", tf, dynamic=False,
+                 disabled=["target_id", "name", "buyer", "calls_30d", "connected_30d", "last_call"])
+
+
+def _buyers_table():
     st.caption("Tick **Watchlist** to get an email every time a call CONNECTS to that buyer. Change anything, then press "
                "**Save changes** once. Add a buyer by name before it has calls and it links automatically later.")
     since = db.now_utc() - timedelta(days=30)
@@ -835,6 +910,7 @@ def page_dids():
                    FROM dids d""")
     camp = didtools.campaign_names(rows)
     calls30 = didtools.calls_last_30d(now)
+    conn30 = didtools.connected_last_30d(now)
     am_notes = cases.latest_by_did()
     case_state = cases.status_by_did()
     recs = []
@@ -846,14 +922,14 @@ def page_dids():
                      "next_charge": fmt(r["next_charge_at"], False)[:10] if r["next_charge_at"] else "",
                      "number": r["number"],
                      "last_call": fmt(r["last_call_at"]) if r["last_call_at"] else "never",
-                     "calls_30d": calls30.get(r["id"], 0),
+                     "calls_30d": calls30.get(r["id"], 0), "conn_30d": conn30.get(r["id"], 0),
                      "follow_up": cases.one_line(am_notes.get(r["id"]), fmt),
                      "case": cases.label(case_state[r["id"]]) if r["id"] in case_state else "",
                      "status": r["status"], "never_alert": bool(r["never_alert"]), "label": r["label"],
                      "monthly_cost": float(r["monthly_cost"]) if r["monthly_cost"] is not None else None, "notes": r["notes"],
                      "idle_days": (now - ref).days if ref else None,
                      "_retired": 1 if r["status"] == "retired" else 0})
-    cols = ["id", "campaign", "publisher", "created_added", "next_charge", "number", "last_call", "calls_30d", "follow_up",
+    cols = ["id", "campaign", "publisher", "created_added", "next_charge", "number", "last_call", "calls_30d", "conn_30d", "follow_up",
             "case", "status", "never_alert", "label", "monthly_cost", "notes", "idle_days"]
     df = frame(recs, cols + ["_retired"])
     df["never_alert"] = df["never_alert"].fillna(False).astype(bool)
@@ -867,14 +943,15 @@ def page_dids():
                 "monthly_cost": v["monthly_cost"], "notes": v["notes"]}
 
     cfg = {"id": None,
-           "campaign": st.column_config.TextColumn("Campaign name"),
-           "publisher": st.column_config.TextColumn("Publisher Name", help="The publisher this number is assigned to in Ringba."),
-           "created_added": st.column_config.TextColumn("DID Created Date", help="Ringba creation (allocation) time. For hand-added DIDs: the day you added it."),
+           "campaign": st.column_config.TextColumn("Campaign"),
+           "publisher": st.column_config.TextColumn("Publisher", help="The publisher this number is assigned to in Ringba."),
+           "created_added": st.column_config.TextColumn("Created", help="Ringba creation (allocation) time. For hand-added DIDs: the day you added it."),
            "next_charge": st.column_config.TextColumn("Next charge", help="When Ringba bills this number next."),
            "number": st.column_config.TextColumn("DID", required=True),
-           "last_call": st.column_config.TextColumn("Last Call Date"),
-           "calls_30d": st.column_config.NumberColumn("Total calls last 30 days"),
-           "follow_up": st.column_config.TextColumn("Follow up note from AM", width="large",
+           "last_call": st.column_config.TextColumn("Last call"),
+           "calls_30d": st.column_config.NumberColumn("Calls 30d", help="All calls to this DID in the last 30 days."),
+           "conn_30d": st.column_config.NumberColumn("Connected 30d", help="Calls in the last 30 days that connected to a buyer."),
+           "follow_up": st.column_config.TextColumn("AM note", width="large",
                                                     help="The latest answer or email reply from the affiliate manager. Full history: 'History of a DID' below."),
            "case": st.column_config.TextColumn("Case", help="Open / Follow-up / Done, for the newest inactive-DID alert."),
            "status": st.column_config.SelectboxColumn("Status", options=["active", "retired"]),
@@ -884,9 +961,9 @@ def page_dids():
            "label": st.column_config.TextColumn("Label"),
            "monthly_cost": st.column_config.NumberColumn("Monthly cost $", min_value=0.0, format="%.2f"),
            "notes": st.column_config.TextColumn("Team notes"),
-           "idle_days": st.column_config.NumberColumn("Days without calls")}
+           "idle_days": st.column_config.NumberColumn("Idle days", help="Days without calls")}
     table_editor("did", df, cfg, ["number", "label", "status", "never_alert", "monthly_cost", "notes"], "dids", tf, required=("number",),
-                 disabled=["campaign", "publisher", "created_added", "next_charge", "last_call", "calls_30d", "follow_up", "case", "idle_days"],
+                 disabled=["campaign", "publisher", "created_added", "next_charge", "last_call", "calls_30d", "conn_30d", "follow_up", "case", "idle_days"],
                  insert_extra={"added_at": db.now_utc()})
 
     with st.expander("📜 History of a DID (every alert, answer and note, saved for later review)"):
@@ -908,7 +985,7 @@ def page_dids():
                 if tl:
                     d = pd.DataFrame(tl)
                     d["created_at"] = d["created_at"].map(fmt)
-                    st.dataframe(d[["created_at", "source", "author", "text", "status_after"]], hide_index=True)
+                    show_df("did_notes", d[["created_at", "source", "author", "text", "status_after"]])
                 else:
                     st.caption("No notes yet.")
             if hist:
@@ -1194,23 +1271,36 @@ def page_emails():
         st.rerun()
 
     st.subheader("3. Affiliate managers")
-    st.caption("Create managers here, then give them to publishers on the Publishers page (a publisher can have several). "
-               "Remove a row to delete a manager.")
-    rows = db.q("SELECT id, name, email, active FROM affiliate_managers ORDER BY name")
-    df = frame(rows, ["id", "name", "email", "active"])
+    st.caption("Add a manager (name + email + Active). A manager gets e-mail copies in **two** ways: "
+               "**(a)** tick **Gets ALL alerts** here: copied on every alert (publisher, buyer, target, DID, watchlist ...), "
+               "or **(b)** give the manager to publishers on the Publishers page: copied only on alerts of those publishers, "
+               "and only for alert types that have **CC affiliate managers** ticked in section 4. "
+               "A manager with neither gets nothing. Remove a row to delete a manager.")
+    rows = db.q("""SELECT m.id, m.name, m.email, m.active, m.all_alerts,
+                          (SELECT COUNT(*) FROM publisher_managers pm WHERE pm.manager_id = m.id) AS publishers
+                   FROM affiliate_managers m ORDER BY m.name""")
+    df = frame(rows, ["id", "name", "email", "active", "all_alerts", "publishers"])
     df["active"] = df["active"].fillna(True).astype(bool)
+    df["all_alerts"] = df["all_alerts"].fillna(False).astype(bool)
+    for r in rows:
+        if r["active"] and not r["all_alerts"] and not r["publishers"]:
+            st.warning(f"**{r['name']}** is active but has no publishers and 'Gets ALL alerts' is off, so no e-mail is sent to this manager. "
+                       "Tick **Gets ALL alerts** or give the manager to publishers on the Publishers page.")
 
     def tf(v):
         validate_emails(v["email"], "email")
         if not alerts.EMAIL_RE.match((v["email"] or "").split(",")[0].strip()):
             raise ValueError("email is required")
-        return {"name": v["name"], "email": v["email"], "active": bool(v["active"]) if v["active"] is not None else True}
+        return {"name": v["name"], "email": v["email"], "active": bool(v["active"]) if v["active"] is not None else True,
+                "all_alerts": bool(v["all_alerts"]) if v["all_alerts"] is not None else False}
 
     cfg = {"id": None, "name": st.column_config.TextColumn("Manager name", required=True),
            "email": st.column_config.TextColumn("Email", required=True),
-           "active": st.column_config.CheckboxColumn("Active")}
-    table_editor("mgr", df, cfg, ["name", "email", "active"], "affiliate_managers", tf, required=("name", "email"),
-                 allow_delete=True)
+           "active": st.column_config.CheckboxColumn("Active"),
+           "all_alerts": st.column_config.CheckboxColumn("Gets ALL alerts", help="Copied on every alert, no publisher needed."),
+           "publishers": st.column_config.NumberColumn("Publishers given", help="How many publishers this manager is assigned to.")}
+    table_editor("mgr", df, cfg, ["name", "email", "active", "all_alerts"], "affiliate_managers", tf, required=("name", "email"),
+                 allow_delete=True, disabled=["publishers"])
 
     st.subheader("4. Each alert type: on/off, numbers, and who is copied")
     st.caption("The wording of each email and its answer buttons are on the 'Email templates' page.")
@@ -1246,6 +1336,7 @@ def page_emails():
         st.markdown(
             "- **To:** always the admin emails above.\n"
             "- **CC affiliate managers:** ALL active managers given to that publisher (publisher alerts only).\n"
+            "- **Managers with 'Gets ALL alerts':** copied on every alert of every type (except your own task / system e-mails), whatever the switches below.\n"
             "- **CC publisher / buyer own email:** only if the alert switch here is on **and** 'CC the publisher/buyer?' is ticked on their row.\n"
             "- **CC their extra emails:** the 'Extra CC emails' on that publisher or buyer row.\n"
             "- **Always CC these emails:** extra addresses for that alert type.\n"
@@ -1450,7 +1541,7 @@ def page_log():
         case_f = f2.multiselect("Team status", cases.STATUSES, default=cases.STATUSES, format_func=cases.label)
     if show and case_f:
         rows = db.q_in("SELECT id, created_at, alert_type, dedupe_key, thread_id, subject, to_emails, cc_emails, status, attempts, last_error, case_status, "
-                       "response_label, response_note, responded_by, responded_at FROM alerts WHERE status IN :s ORDER BY id DESC LIMIT 400",
+                       "response_label, response_note, responded_by, responded_at FROM alerts WHERE status IN :s ORDER BY id DESC LIMIT 20000",
                        "s", show)
         rows = [r for r in rows if (r["case_status"] or "open") in case_f]
         if code_ids is not None:
@@ -1533,6 +1624,7 @@ def page_log():
                                             disabled=[c for c in cols if c not in ("team_status", "add_note")])
                 who_t = st.text_input("Your name (saved with your changes)", key="log_who_table")
                 go_t = st.form_submit_button("💾 Save status / notes")
+            csv_button("alert_log", df)
             if go_t:
                 orig_by = {int(r["id"]): r for _, r in df.iterrows()}
                 changed = 0
@@ -1638,7 +1730,7 @@ def log_cleanup():
                    "Delete the test alerts here and the engine creates fresh, real ones on its next run (25 emails go out per run).")
         flash("flash_cleanup")
         also = st.checkbox("Also resume paused (snoozed) DIDs / caps that belong to the deleted alerts", value=True, key="clean_resume")
-        recent = db.q("SELECT id, created_at, alert_type, subject, status FROM alerts ORDER BY id DESC LIMIT 300")
+        recent = db.q("SELECT id, created_at, alert_type, subject, status FROM alerts ORDER BY id DESC LIMIT 5000")
         labels = {f"#{r['id']} · {fmt(r['created_at'])} · {r['status']} · {r['subject']}"[:160]: r["id"] for r in recent}
         with st.form("clean_pick_form"):
             pick = st.multiselect("1. Pick the alerts to delete", list(labels), key="clean_pick")
@@ -1817,14 +1909,14 @@ def page_tasks():
         rule = {"pick_weekdays": ss.get("task_wdays"), "pick_monthdays": ss.get("task_mdays"), "pick_dates": ss.get("task_dates"),
                 "slots": ss.get("task_slots")}.get(rep)
         return rep, rule, {"title": ss.get("task_title"), "notes": ss.get(note_key) or "", "work_date": ss.get("task_wd"),
-                           "alert_date": ss.get("task_ad"), "alert_time": ss.get("task_at"), "repeat": rep}
+                           "alert_date": ss.get("task_ad"), "alert_time": ss.get("task_at"), "repeat": rep, "cc_emails": ss.get("task_cc") or ""}
 
     def add_task_cb():
         ss = st.session_state
         rep, rule, d = draft_from_state()
         try:
             tid = tasks.add_task(d["title"], d["notes"], d["work_date"], d["alert_date"], rep, d["alert_time"],
-                                 ss.get("task_rdays") if rep == "custom" else None, rule)
+                                 ss.get("task_rdays") if rep == "custom" else None, rule, cc_emails=d["cc_emails"])
             row = db.q1("SELECT * FROM tasks WHERE id=:i", i=tid)
             late = tasks.alert_dt(row) <= db.now_utc()
             first = tasks.pdate(row["alert_date"])
@@ -1832,6 +1924,7 @@ def page_tasks():
                       if late else f"First e-mail: {first:%a %d %b %Y} at {tasks.fmt_time(row['alert_time'])}.") +
                       (f" It repeats: {tasks.repeat_label(rep, ss.get('task_rdays'), row['repeat_rule'])}." if rep != "none" else ""))
             ss["task_title"] = ""
+            ss["task_cc"] = ""
             ss["task_ver"] = ss.get("task_ver", 0) + 1          # a fresh, empty details box
             ss.pop("task_preview", None)
         except ValueError as e:
@@ -1849,6 +1942,8 @@ def page_tasks():
         st.text_input("Task subject (this becomes the e-mail subject)", key="task_title", placeholder="For example: Call Rehab buyer about the cap")
         st.markdown("**Details: what to do** (optional)")
         richnote.rich_note("", key=note_key, height=320)
+        st.text_input("CC e-mails for this task (optional)", key="task_cc", placeholder="john@company.com, mary@company.com",
+                      help="These people get a copy of this task's alert and follow-up e-mails. Separate with commas. You can change it later.")
         c1, c2, c3 = st.columns(3)
         c1.date_input("Work date (do it on)", td, key="task_wd")
         c2.date_input("Alert date (e-mail me on)", td, key="task_ad", help="Can be earlier than the work date.")
@@ -1912,10 +2007,10 @@ def page_tasks():
                             "Work date": tasks.pdate(r["work_date"]), "Alert date": tasks.pdate(r["alert_date"]),
                             "Alert time": tasks.fmt_time(r["alert_time"] or tasks.default_time()), "Repeat": tasks.REPEAT_SHORT[r["repeat"]],
                             "Repeat details": (str(r["repeat_days"] or "") if r["repeat"] == "custom" else tasks.rule_text(r["repeat"], r["repeat_rule"])),
-                            "Next e-mail": tasks.next_alert_text(r, now),
+                            "Next e-mail": tasks.next_alert_text(r, now), "CC": r.get("cc_emails") or "",
                             "Details": " / ".join(x.strip() for x in tasks.note_text(r).split("\n") if x.strip())[:3000], "Remove": False} for r in shown])
         df, sig = filter_bar("tasks", df, skip=("Task", "Details", "Next e-mail", "id", "Repeat details", "Created"))
-        default_order = ["id", "Done", "Status", "Created", "Task", "Details", "Work date", "Alert date", "Alert time", "Repeat", "Repeat details", "Next e-mail", "Remove"]
+        default_order = ["id", "Done", "Status", "Created", "Task", "Details", "Work date", "Alert date", "Alert time", "Repeat", "Repeat details", "Next e-mail", "CC", "Remove"]
         df = df[[c for c in default_order if c in df.columns]]          # starting order; your own saved order (below) wins
         cfg = {"id": None, "Done": st.column_config.CheckboxColumn("Done", width="small"),
                "Status": st.column_config.TextColumn("Status", width="medium"),
@@ -1928,6 +2023,7 @@ def page_tasks():
                "Repeat details": st.column_config.TextColumn("Repeat details", help="Every N days: the number. Chosen weekdays: Mon, Tue. "
                                                              "Chosen month days: 15, 20, last. Chosen dates: 2026-12-01, 2026-12-15. "
                                                              "Several times (circle): Mon 10:00 AM, Fri 03:00 PM, 15 03:00 AM."),
+               "CC": st.column_config.TextColumn("CC e-mails", help="Extra people who get this task's e-mails. Separate with commas."),
                "Remove": st.column_config.CheckboxColumn("Remove", width="small", help="Deletes the task (the history stays)")}
         order, cfg = view_controls("tasks", df, cfg)                     # same "Arrange columns / column width" box as the other tables
         styled = df.style.apply(lambda r: [{"🔴": "background-color: rgba(255,75,75,0.18)", "🟠": "background-color: rgba(255,170,0,0.18)"}
@@ -1940,6 +2036,7 @@ def page_tasks():
                 ed = st.data_editor(df, hide_index=True, use_container_width=True, key=f"task_editor_{sig}_plain",
                                     disabled=["id", "Status", "Next e-mail", "Created", "Details"], column_order=order, column_config=cfg)
             save_tasks = st.form_submit_button("💾 Save changes", type="primary")
+        csv_button("tasks", df)
         if save_tasks:
             done = changed = removed = 0
             errs = []
@@ -1962,7 +2059,8 @@ def page_tasks():
                     if tasks.update_task(tid, title=n["Task"],
                                          work_date=n["Work date"] if pd.notna(n["Work date"]) else None,
                                          alert_date=n["Alert date"] if pd.notna(n["Alert date"]) else None,
-                                         alert_time=n["Alert time"], repeat=rep_k, **kw):
+                                         alert_time=n["Alert time"], repeat=rep_k,
+                                         cc_emails=str(n["CC"] or ""), **kw):
                         changed += 1
                 except ValueError as e:
                     errs.append(f"{n['Task']}: {e}")
@@ -1989,7 +2087,8 @@ def page_tasks():
             def edit_cb():
                 ss = st.session_state
                 try:
-                    tasks.update_task(pick, title=ss.get(f"task_edit_title_{pick}_{ev}"), notes=ss.get(nk) or "")
+                    tasks.update_task(pick, title=ss.get(f"task_edit_title_{pick}_{ev}"), notes=ss.get(nk) or "",
+                                      cc_emails=ss.get(f"task_edit_cc_{pick}_{ev}") or "")
                     set_flash("flash_tasks", "ok", "Task saved.")
                     ss["task_edit_ver"] = ev + 1
                     ss.pop("task_edit_preview", None)
@@ -2003,6 +2102,8 @@ def page_tasks():
 
             with st.form(f"task_edit_one_{pick}_{ev}", border=False):
                 st.text_input("Task subject", cur["title"], key=f"task_edit_title_{pick}_{ev}")
+                st.text_input("CC e-mails for this task (empty = nobody)", cur.get("cc_emails") or "", key=f"task_edit_cc_{pick}_{ev}",
+                              help="Separate with commas. Applies to the next alert and follow-ups of this task.")
                 richnote.rich_note(init, key=nk, height=320)
                 e1, e2 = st.columns(2)
                 e1.form_submit_button("👁 Preview e-mail", on_click=edit_pv_cb)
@@ -2015,7 +2116,7 @@ def page_tasks():
                     st.markdown(html_p, unsafe_allow_html=True)
 
     with st.expander("✅ Done recently (tick Reopen to bring a task back)"):
-        dn = db.q("SELECT id, title, done_at FROM tasks WHERE status='done' ORDER BY done_at DESC LIMIT 30")
+        dn = db.q("SELECT id, title, done_at FROM tasks WHERE status='done' ORDER BY done_at DESC LIMIT 5000")
         if dn:
             ddf = pd.DataFrame([{"id": r["id"], "Reopen": False, "Task": r["title"], "Done at": tasks.fmt_dt(r["done_at"])} for r in dn])
             with st.form("task_reopen_form", border=False):
@@ -2031,7 +2132,7 @@ def page_tasks():
             st.write("No finished tasks yet. (Repeating tasks do not appear here: they move to their next date. See History.)")
 
     with st.expander("🕘 History (when tasks were created, alerted, changed or done)"):
-        lg = db.q("SELECT at, task_title, event, detail FROM task_log ORDER BY id DESC LIMIT 300")
+        lg = db.q("SELECT at, task_title, event, detail FROM task_log ORDER BY id DESC LIMIT 5000")
         hdf = frame([{"When": tasks.fmt_dt(r["at"]), "Task": r["task_title"], "What happened": r["event"], "Details": r["detail"]} for r in lg],
                     ["When", "Task", "What happened", "Details"])
         show_df("taskhist", hdf)

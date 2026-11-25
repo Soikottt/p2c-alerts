@@ -123,6 +123,44 @@ def rule_watchlist_buyer(now):
     return made
 
 
+def rule_watchlist_target(now):
+    """A call CONNECTED to a watched target. Only targets that are ACTIVE (and whose buyer is active) are watched.
+    Calls only store the target NAME, so the match is by name (and by buyer when both sides know the buyer)."""
+    if not alerts.rule_enabled("watchlist_target"):
+        return 0
+    since = now - timedelta(hours=LOOKBACK_HOURS)
+    rows = db.q("""SELECT c.call_id, c.call_at, c.publisher_id, c.buyer_id, c.connected, c.converted, c.paid,
+                          c.campaign_name, c.caller_number AS caller, p.name AS pub_name, b.name AS buyer_name,
+                          d.number AS did, t.name AS target_name, t.ringba_target_id AS target_id, t.buyer_name AS t_buyer_name
+                   FROM calls c
+                   JOIN targets t ON LOWER(TRIM(t.name)) = LOWER(TRIM(c.target_name))
+                        AND (t.buyer_id IS NULL OR c.buyer_id IS NULL OR t.buyer_id = c.buyer_id)
+                   LEFT JOIN buyers tb ON tb.id = t.buyer_id
+                   LEFT JOIN publishers p ON p.id = c.publisher_id
+                   LEFT JOIN buyers b ON b.id = c.buyer_id
+                   LEFT JOIN dids d ON d.id = c.did_id
+                   WHERE c.source = 'live' AND c.created_at >= :since AND c.connected = TRUE
+                     AND t.watchlist = TRUE AND t.active = TRUE
+                     AND (t.buyer_id IS NULL OR COALESCE(tb.status, 'active') = 'active')
+                     AND COALESCE(d.never_alert, FALSE) = FALSE
+                   ORDER BY c.call_at, c.call_id""", since=since)
+    seen, calls = set(), []
+    for c in rows:                                   # two targets with the same name must not alert twice for one call
+        if c["call_id"] not in seen:
+            seen.add(c["call_id"]); calls.append(c)
+    known = alerts.existing_keys([f"watcht:{c['call_id']}" for c in calls])
+    made = 0
+    for c in calls:
+        if f"watcht:{c['call_id']}" in known:
+            continue
+        ctx = {**_call_ctx(c), "target": c["target_name"], "target_id": c["target_id"] or "-",
+               "buyer": c.get("buyer_name") or c.get("t_buyer_name") or "-"}
+        if alerts.create_alert("watchlist_target", f"watcht:{c['call_id']}", ctx,
+                               publisher_id=c["publisher_id"], buyer_id=c["buyer_id"]):
+            made += 1
+    return made
+
+
 def cap_usage(cap, now, ent_name=None, ins=None):
     """How much of a cap is used right now. Returns dict(usage, pct, start, key, name).
     ent_name / ins (an insights.Usage) are optional: the Cap overview passes them so it does not ask the database again for every cap."""
@@ -430,7 +468,7 @@ def run_all(now=None, log=None, max_new=None, seconds=None):
     _live["done"] = False                              # the live Ringba check for follow-ups runs at most once per run
     alerts.set_budget(max_new, seconds)
     try:
-        for name, fn in [("publishers", rule_new_and_lapsed_publisher), ("watchlist", rule_watchlist_buyer),
+        for name, fn in [("publishers", rule_new_and_lapsed_publisher), ("watchlist", rule_watchlist_buyer), ("watchlist_target", rule_watchlist_target),
                          ("caps", rule_caps), ("targets", rule_target_caps), ("dids", rule_inactive_dids), ("new dids", rule_new_dids_no_calls), ("tasks", rule_task_digest)]:
             t0 = time.monotonic()
             out[name] = fn(now)

@@ -27,6 +27,7 @@ PLACEHOLDERS = {
     "new_publisher": [("call_number", "1 for the first call, 2 for the second ..."), ("first_n", "The N in 'first N calls'")] + CALL_PH,
     "lapsed_publisher": [("gap_days", "Days of silence"), ("last_call_time", "Time of the previous call")] + CALL_PH,
     "watchlist_buyer": CALL_PH,
+    "watchlist_target": [("target", "Target name"), ("target_id", "Target ID")] + CALL_PH,
     "publisher_cap": CAP_PH,
     "buyer_cap": CAP_PH,
     "did_new_no_calls": [("did", "The DID"), ("label", "Your label for it"), ("label_part", "' (label)' or empty"),
@@ -67,6 +68,8 @@ DEFAULTS = {
                          "Publisher **{publisher}** just sent a call after **{gap_days} days** of silence (previous call: {last_call_time}).\n\n" + _CALL_BODY),
     "watchlist_buyer": ("Watchlist buyer {buyer} connected a call",
                         "A call **CONNECTED** to watchlist buyer **{buyer}**.\n\n" + _CALL_BODY),
+    "watchlist_target": ("Watchlist target {target} connected a call",
+                         "A call **CONNECTED** to watchlist target **{target}** (ID {target_id}).\n\n" + _CALL_BODY),
     "task_alert": ("{heading}: {subject_text}",
                    "**{heading}** - {now}\n\n{task_list}\n\nOpen the app, go to **My Tasks** and tick **Done**: {app_url}\n\n{followup_note}"),
     "task_digest": ("My tasks for {date} - {count} to do",
@@ -122,6 +125,7 @@ SAMPLE = {
 SAMPLE["new_publisher"] = {**SAMPLE["call"], "call_number": "3", "first_n": "10"}
 SAMPLE["lapsed_publisher"] = {**SAMPLE["call"], "gap_days": "41", "last_call_time": "2026-09-29 11:02 AM EDT"}
 SAMPLE["watchlist_buyer"] = SAMPLE["call"]
+SAMPLE["watchlist_target"] = {**SAMPLE["call"], "target": "Rehab Main Target", "target_id": "PI1234abcd"}
 SAMPLE["publisher_cap"] = {**SAMPLE["cap"], "entity_type": "publisher", "name": "Acme Media", "metric_label": "converted calls"}
 SAMPLE["buyer_cap"] = SAMPLE["cap"]
 SAMPLE["target_cap"] = {"target": "Rehab - Best Rehab Co (Texas)", "buyer": "Best Rehab Co", "period": "monthly", "percent": "92", "level": "90",

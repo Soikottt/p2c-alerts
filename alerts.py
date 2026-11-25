@@ -78,9 +78,24 @@ def _entity_cc_uncached(rule, entity_type, entity_id):
     return cc
 
 
+NO_MANAGER_COPY = {"task_digest", "task_alert", "engine_stale", "sync_error", "alert_response"}   # your own / system mails
+
+
+def all_alert_managers():
+    """Active managers who ticked 'Gets ALL alerts': they are copied on every business alert, assigned to a publisher or not."""
+    def load():
+        out = []
+        for m in db.q("SELECT email FROM affiliate_managers WHERE active = TRUE AND all_alerts = TRUE ORDER BY name"):
+            out += parse_emails(m["email"])
+        return out
+    return db.memo(("all_alert_mgrs",), load)
+
+
 def build_recipients(rule, publisher_id=None, buyer_id=None):
     to = admin_to()
     cc = parse_emails(rule.get("extra_cc"))
+    if rule.get("alert_type") not in NO_MANAGER_COPY:
+        cc += all_alert_managers()
     if publisher_id:
         cc += _entity_cc(rule, "publisher", publisher_id)
     if buyer_id:

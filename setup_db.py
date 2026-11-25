@@ -18,6 +18,8 @@ RULE_SEEDS = [
      "A publisher sends a call after not calling for N days. N = 'Days'."),
     ("watchlist_buyer", "Watchlist buyer connected", True, None, None, False, True, True,
      "A call connected to a buyer that has Watchlist ticked on the Buyers tab."),
+    ("watchlist_target", "Watchlist target connected", True, None, None, False, True, True,
+     "A call connected to a target that has Watchlist ticked on the Buyers tab (Target watchlist). Only active targets of active buyers."),
     ("publisher_cap", "Publisher cap warning", True, None, None, True, True, True,
      "Publisher reached a % of its cap. Percentages are set per cap on the Caps tab."),
     ("buyer_cap", "Buyer cap warning", True, None, None, False, True, True,
@@ -72,6 +74,9 @@ ADD_COLUMNS = [
     ("tasks", "repeat_rule", "TEXT"),
     ("tasks", "last_alert_at", "TIMESTAMPTZ"),
     ("tasks", "alert_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("tasks", "cc_emails", "TEXT"),
+    ("targets", "watchlist", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("affiliate_managers", "all_alerts", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ("caps", "ringba_key", "TEXT"),
     ("alerts", "thread_id", "INTEGER"),
     ("alerts", "snooze_key", "TEXT"),
@@ -193,7 +198,9 @@ def ensure_columns():
         db.q1("SELECT thread_id, claimed_at, sent_to FROM alerts LIMIT 1")
         db.q1("SELECT all_time_cap, count_total FROM targets LIMIT 1")
         db.q1("SELECT source, ringba_key FROM caps LIMIT 1")
-        db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count FROM tasks LIMIT 1")
+        db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count, cc_emails FROM tasks LIMIT 1")
+        db.q1("SELECT watchlist FROM targets LIMIT 1")
+        db.q1("SELECT all_alerts FROM affiliate_managers LIMIT 1")
         db.q1("SELECT event FROM task_log LIMIT 1")
         db.q1("SELECT day, paid FROM daily_stats LIMIT 1")
         db.q1("SELECT day FROM insight_days LIMIT 1")

@@ -316,7 +316,7 @@ def log(task_id, title, event, detail=""):
          i=task_id, t=title, n=db.now_utc(), e=event, d=detail)
 
 
-def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", alert_time=None, repeat_days=None, repeat_rule=None, now=None):
+def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", alert_time=None, repeat_days=None, repeat_rule=None, now=None, cc_emails=""):
     title = (title or "").strip()
     if not title:
         raise ValueError("Please write what the task is.")
@@ -339,12 +339,26 @@ def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", al
         ad, wd = first - (wd - ad), first               # the first work date is the first chosen day; the alert keeps its distance
     at = parse_time(alert_time) or default_time()
     rd = max(int(repeat_days), 1) if (repeat == "custom" and repeat_days) else (1 if repeat == "custom" else None)
-    rows = db.q("INSERT INTO tasks (title, notes, work_date, alert_date, alert_time, repeat, repeat_days, repeat_rule, status, alert_count, created_at, updated_at) "
-                "VALUES (:t,:n,:w,:a,:at,:r,:rd,:rr,'open',0,:now,:now) RETURNING id",
-                t=title, n=clean_note(notes), w=iso(wd), a=iso(ad), at=at, r=repeat, rd=rd, rr=rule, now=db.now_utc())
+    cc = clean_cc(cc_emails)
+    rows = db.q("INSERT INTO tasks (title, notes, work_date, alert_date, alert_time, repeat, repeat_days, repeat_rule, status, alert_count, created_at, updated_at, cc_emails) "
+                "VALUES (:t,:n,:w,:a,:at,:r,:rd,:rr,'open',0,:now,:now,:cc) RETURNING id",
+                t=title, n=clean_note(notes), w=iso(wd), a=iso(ad), at=at, r=repeat, rd=rd, rr=rule, now=db.now_utc(), cc=cc or None)
     tid = rows[0]["id"]
-    log(tid, title, "created", f"work {iso(wd)}, alert {iso(ad)} {fmt_time(at)}, {repeat_label(repeat, rd, rule)}")
+    log(tid, title, "created", f"work {iso(wd)}, alert {iso(ad)} {fmt_time(at)}, {repeat_label(repeat, rd, rule)}" + (f", CC {cc}" if cc else ""))
     return tid
+
+
+def clean_cc(text):
+    """'a@x.com; b@y.com' -> 'a@x.com, b@y.com' (valid addresses only, no duplicates). Wrong text raises ValueError."""
+    raw = [p.strip() for p in _re0.split(r"[,;\s]+", text or "") if p.strip()]
+    bad = [p for p in raw if not alerts.EMAIL_RE.match(p)]
+    if bad:
+        raise ValueError("CC e-mail looks wrong: " + ", ".join(bad))
+    seen, out = set(), []
+    for p in raw:
+        if p.lower() not in seen:
+            seen.add(p.lower()); out.append(p)
+    return ", ".join(out)
 
 
 def default_time():
@@ -361,7 +375,7 @@ def repeat_label(repeat, days=None, rule=None):
     return REPEAT_LABEL.get(repeat, repeat)
 
 
-FIELDS = ("title", "notes", "work_date", "alert_date", "alert_time", "repeat", "repeat_days", "repeat_rule")
+FIELDS = ("title", "notes", "work_date", "alert_date", "alert_time", "repeat", "repeat_days", "repeat_rule", "cc_emails")
 RESET_ALERT_ON = ("work_date", "alert_date", "alert_time", "repeat", "repeat_days", "repeat_rule")     # a changed schedule starts the alert again
 
 
@@ -388,11 +402,13 @@ def update_task(task_id, **new):
             v = parse_slots(v) if eff == "slots" else (parse_rule(eff, v) if eff in PICK else None)
         elif f == "notes":
             v = clean_note(v)
+        elif f == "cc_emails":
+            v = clean_cc(v)
         else:
             v = (v or "").strip()
             if f == "title" and not v:
                 continue
-        cur = old[f] or ("" if f in ("title", "notes") else None)
+        cur = old[f] or ("" if f in ("title", "notes", "cc_emails") else None)
         if f in ("work_date", "alert_date"):
             cur = iso(cur)
         if f == "alert_time":
@@ -977,7 +993,10 @@ def _send_group(items, now, heading, followup, key):
            "now": local_now(now).strftime("%a %d %b %Y, %I:%M %p") + f" ({db.get_setting('tasks_timezone', 'Asia/Dhaka')})",
            "task_list": _task_lines(items, now, followup), "task_list_html": _task_cards_html(items, followup), "app_url": app_url or "(set the app address in Settings)",
            "followup_note": note}
-    if not alerts.create_alert("task_alert", key, ctx):
+    extra = []
+    for t in items:                                    # the CC of every task in this e-mail
+        extra += alerts.parse_emails(t.get("cc_emails"))
+    if not alerts.create_alert("task_alert", key, ctx, cc_extra=extra):
         return 0
     ids = [t["id"] for t in items]
     db.x_in("UPDATE tasks SET alert_count = alert_count + 1, last_alert_at = :n WHERE id IN :ids", "ids", ids, n=now)
