@@ -867,13 +867,56 @@ def note_text(t):
     return "\n".join(x for x in lines if x.strip()).strip()
 
 
+_CSS_COLOR = _re0.compile(r"(?<![-\w])color\s*:\s*([^;\"']+)", _re0.I)
+_CSS_BG = _re0.compile(r"background(?:-color)?\s*:\s*([^;\"']+);?", _re0.I)
+_FONT_COLOR = _re0.compile(r"""(<font\b[^>]*?)\scolor=["']([^"']+)["']""", _re0.I)
+
+
+def _lum(v):
+    """0 (black) .. 1 (white) for #rgb, #rrggbb, rgb(), rgba() and a few names; None when unknown."""
+    v = (v or "").strip().lower()
+    names = {"white": 1.0, "black": 0.0, "snow": 0.99, "ivory": 0.99, "whitesmoke": 0.96, "yellow": 0.93}
+    if v in names:
+        return names[v]
+    m = _re0.match(r"#([0-9a-f]{3}|[0-9a-f]{6})$", v)
+    if m:
+        h = m.group(1)
+        h = "".join(c * 2 for c in h) if len(h) == 3 else h
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    else:
+        m = _re0.match(r"rgba?\(\s*(\d+)[ ,]+(\d+)[ ,]+(\d+)", v)
+        if not m:
+            return None
+        r, g, b = (int(x) for x in m.groups())
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255
+
+
+def fix_contrast(html):
+    """The e-mail is read on a white page with dark text. Remove near-white text colours and dark backgrounds
+    (they come from pasting out of a dark screen) so nothing becomes invisible."""
+    if not html:
+        return html
+    def col(m):
+        l = _lum(m.group(1))
+        return "" if l is not None and l > 0.8 else m.group(0)
+    def bg(m):
+        l = _lum(m.group(1))
+        return "" if l is not None and l < 0.45 else m.group(0)
+    def font(m):
+        l = _lum(m.group(2))
+        return m.group(1) if l is not None and l > 0.8 else m.group(0)
+    html = _CSS_COLOR.sub(col, html)
+    html = _CSS_BG.sub(bg, html)
+    return _FONT_COLOR.sub(font, html)
+
+
 def note_html(t):
     """The note as safe HTML for the e-mail (old plain notes: one line = one bullet)."""
     raw = ((t.get("notes") if isinstance(t, dict) else t) or "").strip()
     if not raw:
         return ""
     if is_html(raw):
-        return clean_html(raw)
+        return fix_contrast(clean_html(raw))
     items = []
     for ln in raw.replace("\r", "").split("\n"):
         ln = ln.strip().lstrip("-*\u2022\u25cf").strip()
@@ -889,7 +932,7 @@ def clean_note(text):
         return ""
     if not is_html(text):
         return text
-    h = clean_html(text)
+    h = fix_contrast(clean_html(text))
     return h if note_text(h).strip() else ""
 
 

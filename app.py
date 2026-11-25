@@ -369,6 +369,24 @@ def filter_bar(name, df, skip=(), max_unique=40):
     return out.reset_index(drop=True), sig
 
 
+def mail_preview(html_body, plain_body=None):
+    """Show an e-mail the way a mail app does: white page, dark text, whatever theme (dark / light) the app uses.
+    Fixes text that had the same colour as the background."""
+    import html as _h
+    import streamlit.components.v1 as components
+    page = ('<div style="background:#ffffff;color:#202124;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;'
+            'padding:16px 18px;border:1px solid #dadce0;border-radius:8px">' + (html_body or "") + "</div>")
+    n = len(re.sub(r"<[^>]+>", "", html_body or "")) 
+    components.html(page, height=min(900, max(180, 140 + int(n / 90) * 22 + (html_body or "").count("<li") * 8 + (html_body or "").count("<tr") * 30)),
+                    scrolling=True)
+    if plain_body is not None:
+        with st.expander("Plain-text version (for mail apps that do not show formatting)"):
+            lines = str(plain_body).count("\n") + 1
+            components.html('<pre style="background:#ffffff;color:#202124;font-family:Consolas,Menlo,monospace;font-size:13px;'
+                            'white-space:pre-wrap;word-wrap:break-word;margin:0;padding:12px 14px;border:1px solid #dadce0;border-radius:8px">'
+                            + _h.escape(str(plain_body)) + "</pre>", height=min(700, max(120, 40 + lines * 20)), scrolling=True)
+
+
 def csv_button(name, df, label="⬇️ Download CSV"):
     """CSV of the table exactly as filtered on screen (all rows, all columns)."""
     if df is None or len(df) == 0:
@@ -801,7 +819,7 @@ def _target_watchlist():
                    WHERE t.active = TRUE AND (t.buyer_id IS NULL OR COALESCE(b.status, 'active') = 'active')
                    ORDER BY buyer, t.name""")
     stat = {}
-    for r in db.q("""SELECT LOWER(TRIM(target_name)) AS k, COUNT(*) AS n, SUM(CASE WHEN connected THEN 1 ELSE 0 END) AS conn,
+    for r in db.q("""SELECT LOWER(TRIM(target_name)) AS k, COUNT(*) AS n, SUM(CASE WHEN converted THEN 1 ELSE 0 END) AS conv,
                             MAX(call_at) AS last_call FROM calls WHERE call_at >= :s AND target_name IS NOT NULL
                      GROUP BY LOWER(TRIM(target_name))""", s=since):
         stat[r["k"]] = r
@@ -811,7 +829,7 @@ def _target_watchlist():
     for r in rows:
         k = (r["name"] or "").strip().lower()
         r["calls_30d"] = int((stat.get(k) or {}).get("n") or 0)
-        r["connected_30d"] = int((stat.get(k) or {}).get("conn") or 0)
+        r["converted_30d"] = int((stat.get(k) or {}).get("conv") or 0)
         lc = (stat.get(k) or {}).get("last_call")
         r["last_call"] = fmt(lc) if lc else "none in 30d"
     if not rows:
@@ -821,7 +839,7 @@ def _target_watchlist():
     if dup:
         st.warning("Two active targets share the same name (" + ", ".join(dup[:5]) + "). Calls only carry the target name, so both are "
                    "matched by that name. Give them different names in Ringba to tell them apart.")
-    cols = ["id", "target_id", "name", "buyer", "watchlist", "calls_30d", "connected_30d", "last_call"]
+    cols = ["id", "target_id", "name", "buyer", "watchlist", "calls_30d", "converted_30d", "last_call"]
     df = frame(rows, cols)
     df["watchlist"] = df["watchlist"].fillna(False).astype(bool)
     n_on = int(df["watchlist"].sum())
@@ -832,10 +850,10 @@ def _target_watchlist():
 
     cfg = {"id": None, "target_id": st.column_config.TextColumn("Target ID"), "name": st.column_config.TextColumn("Target name"),
            "buyer": st.column_config.TextColumn("Buyer"), "watchlist": st.column_config.CheckboxColumn("⭐ Watchlist"),
-           "calls_30d": st.column_config.NumberColumn("Calls 30d"), "connected_30d": st.column_config.NumberColumn("Connected 30d"),
+           "calls_30d": st.column_config.NumberColumn("Calls 30d"), "converted_30d": st.column_config.NumberColumn("Converted 30d", help="Calls in the last 30 days that converted."),
            "last_call": st.column_config.TextColumn("Last call")}
     table_editor("tgwatch", df, cfg, ["watchlist"], "targets", tf, dynamic=False,
-                 disabled=["target_id", "name", "buyer", "calls_30d", "connected_30d", "last_call"])
+                 disabled=["target_id", "name", "buyer", "calls_30d", "converted_30d", "last_call"])
 
 
 def _buyers_table():
@@ -1409,12 +1427,10 @@ def page_templates():
         plain_p, html_p = templates.render_body(body, sample)
         st.markdown("**Preview of the email (with example data):**")
         st.markdown(f"**Subject:** {db.get_setting('subject_prefix', '')} {templates.render(subject, sample)}")
-        st.markdown(html_p, unsafe_allow_html=True)
         defs = actions.defs_for(atype)
+        mail_preview(html_p, plain_p)
         if defs:
             st.markdown("**Please choose one:**  " + "   ".join(f"`[ {d['label']} ]`" for d in defs))
-        with st.expander("Plain-text version (for mail apps that do not show formatting)"):
-            st.text(plain_p)
     c1, c2 = st.columns(2)
     if c1.button(f"✅ Use this template for '{choice}'", key=f"use_{atype}_{t['id']}"):
         db.x("UPDATE alert_rules SET template_id=:t WHERE alert_type=:a", t=t["id"], a=atype)
@@ -1976,9 +1992,7 @@ def page_tasks():
         with st.container(border=True):
             st.markdown("**👁 This is how your alert e-mail will look**")
             st.markdown(f"**Subject:** {subj}")
-            st.markdown(html_p, unsafe_allow_html=True)
-            with st.expander("Plain-text version"):
-                st.text(plain_p)
+            mail_preview(html_p, plain_p)
             if st.button("Close preview", key="task_pv_close"):
                 st.session_state.pop("task_preview", None)
                 st.rerun()
@@ -2113,7 +2127,7 @@ def page_tasks():
                 subj, html_p, plain_p = tasks.preview_email([ep])
                 with st.container(border=True):
                     st.markdown(f"**Subject:** {subj}")
-                    st.markdown(html_p, unsafe_allow_html=True)
+                    mail_preview(html_p, plain_p)
 
     with st.expander("✅ Done recently (tick Reopen to bring a task back)"):
         dn = db.q("SELECT id, title, done_at FROM tasks WHERE status='done' ORDER BY done_at DESC LIMIT 5000")
@@ -2364,9 +2378,7 @@ def page_followups():
             try:
                 subject, text, html = followups.preview(row, now)
                 st.markdown(f"**Subject:** {subject}")
-                st.markdown(html, unsafe_allow_html=True)
-                with st.expander("Plain-text version"):
-                    st.text(text)
+                mail_preview(html, text)
                 st.caption("The preview uses today's data. The real email is made when it is due, with the numbers of that day.")
             except Exception as e:
                 st.error(f"Could not build the preview: {e}")
