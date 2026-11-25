@@ -11,6 +11,12 @@ import v2_features as v2
 from timeutil import fmt
 
 
+def _open_alert_center(alert_id):
+    """Navigate to Alert Center and select the requested alert before widgets render."""
+    st.session_state["v2_selected_alert_id"] = int(alert_id)
+    st.session_state["page_v2"] = "🔎 Alert Center"
+
+
 def _status_badge(status):
     return {'sent': 'success', 'received': 'success', 'saved': 'success', 'failed': 'danger',
             'pending': 'warning', 'dry_run': 'info', 'skipped': 'secondary'}.get(str(status or '').lower(), 'secondary')
@@ -120,6 +126,7 @@ def page_alert_center():
         m2.metric("Activities", len(events))
         m3.metric("Team status", cases.label(a.get('case_status')))
         tab_all, tab_emails, tab_replies, tab_notes = st.tabs(["All activity", "Emails", "Replies", "Notes & status"])
+
         def show_timeline(mode='all'):
             for ev in events:
                 kind = ev.get('event') or ''
@@ -142,6 +149,7 @@ def page_alert_center():
                         record = next((x for x in mails if int(x['id']) == int(ev.get('alert_id') or -1)), None)
                         if record:
                             _email_card(record, f"{root}")
+
         with tab_all:
             show_timeline('all')
         with tab_emails:
@@ -191,10 +199,13 @@ def page_email_center():
         choice = st.selectbox("Open an email's alert conversation", range(len(openable)),
                               format_func=lambda i: f"A{openable[i].get('alert_id') or openable[i].get('id')} · {openable[i].get('subject') or '(no subject)'}",
                               key="v2_email_open_pick")
-        if st.button("Open conversation", key="v2_email_open_btn"):
-            st.session_state['v2_selected_alert_id'] = int(openable[choice].get('alert_id') or openable[choice].get('id'))
-            st.session_state['page_v2'] = '🔎 Alert Center'
-            st.rerun()
+        target_alert_id = int(openable[choice].get('alert_id') or openable[choice].get('id'))
+        st.button(
+            "Open conversation",
+            key="v2_email_open_btn",
+            on_click=_open_alert_center,
+            args=(target_alert_id,),
+        )
 
 
 def page_audit_log():
@@ -275,9 +286,11 @@ def page_entity_profiles(entity='publisher'):
         st.dataframe(pd.DataFrame([{'Alert':f"A{r['id']}",'Date':fmt(r['created_at']),'Subject':r['subject'],'Email status':r['status'],'Team status':cases.label(r['case_status'])} for r in related_alerts]), use_container_width=True, hide_index=True)
         _ids = [int(r['id']) for r in related_alerts]
         _selected = st.selectbox('Open related alert', _ids, format_func=lambda i: f"A{i} · {next((r['subject'] for r in related_alerts if int(r['id'])==i), '')}", key=f'v2_{entity}_alert_pick')
-        if st.button('Open alert history', key=f'v2_{entity}_alert_open'):
-            st.session_state['v2_selected_alert_id'] = _selected
-            st.session_state['page_v2'] = '🔎 Alert Center'
-            st.rerun()
+        st.button(
+            'Open alert history',
+            key=f'v2_{entity}_alert_open',
+            on_click=_open_alert_center,
+            args=(_selected,),
+        )
     else:
         st.caption('No matching alerts found in stored subject/body text.')
