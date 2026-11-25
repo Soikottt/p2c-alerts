@@ -134,14 +134,8 @@ def respond(token, who, note, days=None):
              "ON CONFLICT (entity_key) DO UPDATE SET snooze_until=EXCLUDED.snooze_until, reason=EXCLUDED.reason",
              k=key, u=until, r=row["label"])
         effect_text = f"This alert is paused for {row['effect_days']} days."
-        import audit
-        audit.log("followup_paused", "snooze", key, alert_id=row["alert_id"], did_id=int(key[4:]) if key.startswith("did:") and key[4:].isdigit() else None,
-                  new=f"until {until:%Y-%m-%d %H:%M} UTC", detail=row["label"], who=(who or "").strip() or None)
     elif eff == "retire_did" and key and key.startswith("did:"):
         db.x("UPDATE dids SET status='retired' WHERE id=:i", i=int(key.split(":")[1]))
-        import audit
-        audit.log("did_retired", "did", key.split(":")[1], alert_id=row["alert_id"], did_id=int(key.split(":")[1]), new="retired",
-                  detail="answered: " + str(row["label"]), who=(who or "").strip() or None)
         effect_text = "The DID was marked as retired (no more alerts for it)."
     ctx = {"responder": (who or "").strip() or "Someone", "choice": row["label"],
            "note": (note or "").strip() or "-", "original_subject": row["alert_subject"], "effect_text": effect_text,

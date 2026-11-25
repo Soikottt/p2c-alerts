@@ -140,8 +140,11 @@ def _retire_missing(seen):
     for d in gone:
         notes = f"{d['notes']} {stamp}" if d["notes"] else stamp
         db.x("UPDATE dids SET status='retired', notes=:n WHERE id=:i", n=notes, i=d["id"])
-        import audit
-        audit.log("did_retired", "did", d["id"], did_id=d["id"], old="active", new="retired", detail=f"{d['number']} not in Ringba's number list", who="system")
+        try:
+            import v2_features
+            v2_features.audit("did_auto_retired", f"DID {d['number']} automatically retired because it was not in Ringba", entity_type="did", entity_id=d["id"])
+        except Exception:
+            pass
     return len(gone), 0
 
 
@@ -152,8 +155,11 @@ def _reactivate(seen):
         if d["number"] in seen and d["notes"] and AUTO_MARK in d["notes"]:
             cleaned = re.sub(r"\s*\[auto-retired[^\]]*\]", "", d["notes"]).strip() or None
             db.x("UPDATE dids SET status='active', notes=:n WHERE id=:i", n=cleaned, i=d["id"])
-            import audit
-            audit.log("did_reactivated", "did", d["id"], did_id=d["id"], old="retired", new="active", detail=f"{d['number']} is back in Ringba", who="system")
+            try:
+                import v2_features
+                v2_features.audit("did_reactivated", f"DID {d['number']} reactivated after returning to Ringba", entity_type="did", entity_id=d["id"])
+            except Exception:
+                pass
             n += 1
     return n
 

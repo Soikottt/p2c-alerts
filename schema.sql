@@ -220,6 +220,40 @@ CREATE TABLE IF NOT EXISTS inbound_emails (
   received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- V2: complete inbound email archive; the legacy inbound_emails table remains for compatibility.
+CREATE TABLE IF NOT EXISTS email_archive (
+  id BIGSERIAL PRIMARY KEY,
+  message_id TEXT NOT NULL UNIQUE,
+  alert_id INTEGER,
+  direction TEXT NOT NULL DEFAULT 'inbound',
+  from_email TEXT,
+  to_emails TEXT,
+  cc_emails TEXT,
+  subject TEXT,
+  body_text TEXT,
+  body_html TEXT,
+  in_reply_to TEXT,
+  references_header TEXT,
+  outcome TEXT,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_email_archive_alert_received ON email_archive(alert_id, received_at DESC);
+
+-- V2: append-only operational audit trail.
+CREATE TABLE IF NOT EXISTS audit_events (
+  id BIGSERIAL PRIMARY KEY,
+  alert_id INTEGER,
+  entity_type TEXT NOT NULL DEFAULT 'alert',
+  entity_id TEXT,
+  event_type TEXT NOT NULL,
+  actor TEXT,
+  summary TEXT NOT NULL,
+  details TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_audit_events_alert_created ON audit_events(alert_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_audit_events_entity ON audit_events(entity_type, entity_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS targets (
   id SERIAL PRIMARY KEY,
   ringba_target_id TEXT UNIQUE NOT NULL,
@@ -296,55 +330,4 @@ CREATE TABLE IF NOT EXISTS insight_days (
   day DATE PRIMARY KEY,
   synced_at TIMESTAMPTZ NOT NULL,
   row_count INTEGER NOT NULL DEFAULT 0
-);
-
--- ===== Stage 1: full e-mail archive, audit log, users =====
-CREATE TABLE IF NOT EXISTS email_archive (
-  id SERIAL PRIMARY KEY,
-  message_id TEXT UNIQUE NOT NULL,
-  direction TEXT NOT NULL,
-  alert_id INTEGER,
-  subject TEXT,
-  from_email TEXT,
-  to_emails TEXT,
-  cc_emails TEXT,
-  body_text TEXT,
-  body_html TEXT,
-  in_reply_to TEXT,
-  references_hdr TEXT,
-  mail_date TIMESTAMPTZ,
-  delivery_status TEXT,
-  error TEXT,
-  attachments TEXT,
-  outcome TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS ix_email_archive_alert ON email_archive (alert_id);
-CREATE INDEX IF NOT EXISTS ix_email_archive_date ON email_archive (mail_date);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-  id SERIAL PRIMARY KEY,
-  at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  actor TEXT,
-  action TEXT NOT NULL,
-  entity_type TEXT,
-  entity_id TEXT,
-  alert_id INTEGER,
-  did_id INTEGER,
-  old_value TEXT,
-  new_value TEXT,
-  detail TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_audit_at ON audit_log (at);
-CREATE INDEX IF NOT EXISTS ix_audit_alert ON audit_log (alert_id);
-CREATE INDEX IF NOT EXISTS ix_audit_did ON audit_log (did_id);
-
-CREATE TABLE IF NOT EXISTS app_users (
-  id SERIAL PRIMARY KEY,
-  name TEXT UNIQUE NOT NULL,
-  pin_hash TEXT NOT NULL,
-  salt TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'user',
-  active BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

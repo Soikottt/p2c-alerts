@@ -23,6 +23,7 @@ import pubcaps
 import insights
 import targets
 import setup_db
+import v2_features
 import ringba_client as rc
 from timeutil import fmt
 
@@ -72,6 +73,10 @@ def run_once(log=_emit, time_limit=None):
             say("database upgraded (new columns added)")
     except Exception as ex:
         say(f"database check skipped: {ex}")
+    try:
+        v2_features.ensure_schema()
+    except Exception as ex:
+        say(f"V2 email archive / audit schema check skipped: {ex}")
     try:                                   # a run that was cancelled half-way leaves a 'running' record behind: close it
         n = db.x("UPDATE sync_runs SET status='error', finished_at=:n, error='Interrupted: the run was stopped before it finished' "
                  "WHERE status='running' AND started_at < :c", n=now, c=now - timedelta(minutes=15))

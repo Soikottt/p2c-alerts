@@ -13,7 +13,6 @@ from email.header import decode_header, make_header
 from email.utils import parseaddr
 
 import alerts
-import archive
 import cases
 import config
 import db
@@ -52,6 +51,28 @@ def _text_of(msg):
         return ""
     payload = msg.get_payload(decode=True)
     return payload.decode(msg.get_content_charset() or "utf-8", errors="replace") if payload else ""
+
+
+def _html_of(msg):
+    """Return the original HTML alternative when present; never use attachments as message bodies."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/html" and "attachment" not in str(part.get("Content-Disposition", "")).lower():
+                payload = part.get_payload(decode=True)
+                if payload:
+                    return payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+        return ""
+    if msg.get_content_type() == "text/html":
+        payload = msg.get_payload(decode=True)
+        return payload.decode(msg.get_content_charset() or "utf-8", errors="replace") if payload else ""
+    return ""
+
+
+def _decoded_header(msg, key):
+    try:
+        return str(make_header(decode_header(msg.get(key, ""))))
+    except Exception:
+        return str(msg.get(key, "") or "")
 
 
 def _headers_batch(M, ids):
@@ -107,10 +128,15 @@ def sync_replies(days=14, scan=300, max_seconds=45):
             name, addr = parseaddr(msg.get("From", ""))
             addr = (addr or "").lower()
             outcome, aid = "ignored", int(m.group(1))
+            full_text = _text_of(msg)
+            full_html = _html_of(msg)
+            to_header = _decoded_header(msg, "To")
+            cc_header = _decoded_header(msg, "Cc")
+            subject_full = _decoded_header(msg, "Subject")
             if addr and addr != (config.SMTP_USER or "").lower():
                 a = db.q1("SELECT id, subject, to_emails, cc_emails FROM alerts WHERE id=:i", i=aid)
                 allowed = {e.lower() for e in alerts.parse_emails(a["to_emails"]) + alerts.parse_emails(a["cc_emails"])} if a else set()
-                text = clean_reply(_text_of(msg))
+                text = clean_reply(full_text)
                 if a and addr in allowed and text:
                     shown = str(make_header(decode_header(name))).strip() if name else ""
                     who = f"{shown} <{addr}>" if shown and shown.lower() != addr else addr      # name AND e-mail address of the sender
@@ -121,9 +147,25 @@ def sync_replies(days=14, scan=300, max_seconds=45):
                                          "effect_text": "Saved as a follow-up note on the alert.",
                                          "history": alerts.answer_history(aid)}, thread_id=aid, cc_extra=[addr])
                     outcome = "saved"
-            archive.record_in(msg, mid, aid, outcome)
+            received = db.now_utc()
+            # Keep the complete original message separately from the shortened reply note.
+            # The existing inbound_emails table remains untouched for backward compatibility.
+            db.x("""INSERT INTO email_archive
+                    (message_id, alert_id, direction, from_email, to_emails, cc_emails, subject,
+                     body_text, body_html, in_reply_to, references_header, outcome, received_at)
+                    VALUES (:m,:a,'inbound',:f,:to,:cc,:sub,:txt,:html,:irt,:refs,:o,:n)
+                    ON CONFLICT (message_id) DO NOTHING""",
+                 m=mid, a=aid, f=addr, to=to_header, cc=cc_header, sub=subject_full,
+                 txt=full_text, html=full_html, irt=(msg.get("In-Reply-To") or ""),
+                 refs=(msg.get("References") or ""), o=outcome, n=received)
             db.x("INSERT INTO inbound_emails (message_id, alert_id, from_email, outcome, received_at) VALUES (:m,:a,:f,:o,:n)",
-                 m=mid, a=aid, f=addr, o=outcome, n=db.now_utc())
+                 m=mid, a=aid, f=addr, o=outcome, n=received)
+            try:
+                import v2_features
+                v2_features.audit("inbound_email_archived", f"Incoming email archived: {subject_full}", alert_id=aid,
+                                  actor=addr, details=f"outcome={outcome}; message_id={mid}")
+            except Exception:
+                pass
             res["saved" if outcome == "saved" else "ignored"] += 1
     finally:
         try:
