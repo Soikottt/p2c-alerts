@@ -2428,10 +2428,13 @@ def page_followups():
             try:
                 import chain as _chain
                 _aid = _chain.parse_code(row.get("code"))
-                if _aid and st.button("Open conversation history", key=f"fu_open_history_{_aid}"):
-                    st.session_state["v2_selected_alert_id"] = int(_aid)
-                    st.session_state["page_v2"] = "🔎 Alert Center"
-                    st.rerun()
+                if _aid:
+                    st.button(
+                        "Open conversation history",
+                        key=f"fu_open_history_{_aid}",
+                        on_click=v2_ui._open_alert_center,
+                        args=(int(_aid),),
+                    )
             except Exception:
                 pass
     with hist_tab:
