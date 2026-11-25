@@ -8,6 +8,7 @@ from email.utils import formataddr
 
 import actions
 import alerts
+import archive
 import config
 import db
 
@@ -210,6 +211,7 @@ def process_outbox(limit=25, max_seconds=None):
                 print(f"--- DRY RUN (not sent) ---\nTo: {', '.join(to)}\nCC: {', '.join(cc)}\n"
                       f"Subject: {a['subject']}\n{a['body']}\n", flush=True)
                 db.x("UPDATE alerts SET status='dry_run', last_error=NULL, claimed_at=NULL WHERE id=:i", i=a["id"])
+                archive.record_out({**a, "to_emails": ", ".join(to), "cc_emails": ", ".join(cc)}, "dry_run")
                 res["dry_run"] += 1
                 continue
             done = _sent_set(a)
@@ -230,6 +232,8 @@ def process_outbox(limit=25, max_seconds=None):
                 db.x("UPDATE alerts SET status='sent', sent_at=:n, attempts=attempts+1, last_error=NULL, sent_to=:s WHERE id=:i",
                      n=db.now_utc(), s=",".join(sorted(done)), i=a["id"])
                 res["sent"] += 1
+                archive.record_out({**a, "to_emails": ", ".join(to), "cc_emails": ", ".join(cc), "sent_at": db.now_utc()}, "sent",
+                                   message_id=hdr.get("Message-ID"))
             except Exception as e:
                 session.close()                     # next email starts from a fresh connection
                 attempts = a["attempts"] + 1
@@ -237,6 +241,7 @@ def process_outbox(limit=25, max_seconds=None):
                 db.x("UPDATE alerts SET status=:s, attempts=:a, last_error=:e, claimed_at=NULL, sent_to=:t WHERE id=:i",
                      s=status, a=attempts, e=str(e)[:500], t=",".join(sorted(done)) or None, i=a["id"])
                 res["failed"] += 1
+                archive.record_out({**a, "to_emails": ", ".join(to), "cc_emails": ", ".join(cc)}, "failed" if status == "failed" else "retrying", e)
                 print(f"Email failed for alert {a['id']}: {e}", flush=True)
     finally:
         session.close()

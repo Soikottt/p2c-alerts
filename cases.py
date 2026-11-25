@@ -24,13 +24,19 @@ def add_note(alert_id, source, author, text, status=None):
     now = db.now_utc()
     db.x("INSERT INTO alert_notes (alert_id, source, author, text, status_after, created_at) VALUES (:a,:s,:w,:t,:st,:n)",
          a=alert_id, s=source, w=(author or "").strip() or None, t=(text or "").strip(), st=status, n=now)
+    import audit
+    audit.log("note_added", "alert", alert_id, alert_id=alert_id, detail=f"{source}: {(text or '').strip()[:300]}", who=(author or "").strip() or None)
     if status:
         set_status(alert_id, status, now)
 
 
 def set_status(alert_id, status, now=None):
     if status in STATUSES:
+        old = db.q1("SELECT case_status FROM alerts WHERE id=:i", i=alert_id)
         db.x("UPDATE alerts SET case_status=:s, case_updated_at=:n WHERE id=:i", s=status, n=now or db.now_utc(), i=alert_id)
+        if (old or {}).get("case_status") != status:
+            import audit
+            audit.log("status_change", "alert", alert_id, alert_id=alert_id, old=(old or {}).get("case_status") or "open", new=status)
 
 
 def mark_follow_up_if_open(alert_id):

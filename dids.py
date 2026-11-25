@@ -140,6 +140,8 @@ def _retire_missing(seen):
     for d in gone:
         notes = f"{d['notes']} {stamp}" if d["notes"] else stamp
         db.x("UPDATE dids SET status='retired', notes=:n WHERE id=:i", n=notes, i=d["id"])
+        import audit
+        audit.log("did_retired", "did", d["id"], did_id=d["id"], old="active", new="retired", detail=f"{d['number']} not in Ringba's number list", who="system")
     return len(gone), 0
 
 
@@ -150,6 +152,8 @@ def _reactivate(seen):
         if d["number"] in seen and d["notes"] and AUTO_MARK in d["notes"]:
             cleaned = re.sub(r"\s*\[auto-retired[^\]]*\]", "", d["notes"]).strip() or None
             db.x("UPDATE dids SET status='active', notes=:n WHERE id=:i", n=cleaned, i=d["id"])
+            import audit
+            audit.log("did_reactivated", "did", d["id"], did_id=d["id"], old="retired", new="active", detail=f"{d['number']} is back in Ringba", who="system")
             n += 1
     return n
 

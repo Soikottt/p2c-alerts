@@ -204,6 +204,9 @@ def ensure_columns():
         db.q1("SELECT event FROM task_log LIMIT 1")
         db.q1("SELECT day, paid FROM daily_stats LIMIT 1")
         db.q1("SELECT day FROM insight_days LIMIT 1")
+        db.q1("SELECT message_id, body_html FROM email_archive LIMIT 1")
+        db.q1("SELECT actor, old_value FROM audit_log LIMIT 1")
+        db.q1("SELECT pin_hash FROM app_users LIMIT 1")
         return False
     except Exception:
         run(log=lambda m: None, migrate=False)          # safe to repeat: every step is 'IF NOT EXISTS' / 'ON CONFLICT DO NOTHING'
@@ -275,6 +278,13 @@ def run(log=print, schema_file=None, migrate=True):
         _copy_old_data(log)
     seed(log)
     log("  default alert rules and settings are in place")
+    try:
+        import archive
+        n = archive.backfill()
+        if n:
+            log(f"  e-mail archive: {n} earlier alert e-mails copied in (old replies keep their short form)")
+    except Exception as e:
+        log(f"  (e-mail archive copy skipped: {e})")
     log("DONE. Database is ready.")
 
 

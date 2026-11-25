@@ -18,6 +18,9 @@ if not config.DB_URL:
 
 import actions
 import alerts
+import archive
+import audit
+import auth
 import backup
 import cases
 import db
@@ -26,6 +29,7 @@ import engine
 import ingest
 import mailer
 import reports
+import search
 import ringba_client as rc
 import rules
 import setup_db
@@ -112,6 +116,12 @@ def schema_ready():
         db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count FROM tasks LIMIT 1")
         db.q1("SELECT day, paid FROM daily_stats LIMIT 1")
         db.q1("SELECT day FROM insight_days LIMIT 1")
+        db.q1("SELECT cc_emails FROM tasks LIMIT 1")
+        db.q1("SELECT watchlist FROM targets LIMIT 1")
+        db.q1("SELECT all_alerts FROM affiliate_managers LIMIT 1")
+        db.q1("SELECT message_id, body_html FROM email_archive LIMIT 1")
+        db.q1("SELECT actor, old_value FROM audit_log LIMIT 1")
+        db.q1("SELECT pin_hash FROM app_users LIMIT 1")
         return True
     except Exception:
         return False
@@ -202,6 +212,7 @@ def save_table(table, orig, edited, display_cols, pk="id", transform=None, requi
                 vals.update(insert_extra or {})
                 cols = list(vals)
                 db.x(f"INSERT INTO {table} ({','.join(cols)}) VALUES ({','.join(':' + c for c in cols)})", **vals)
+                audit.log("added", table, label, new=json.dumps({k: v for k, v in disp.items() if v not in (None, "")}, default=str)[:500])
                 done["added"] += 1
             else:
                 seen.add(pkv)
@@ -214,6 +225,10 @@ def save_table(table, orig, edited, display_cols, pk="id", transform=None, requi
                 vals = transform(disp) if transform else dict(disp)
                 sets = ",".join(f"{c}=:{c}" for c in vals)
                 db.x(f"UPDATE {table} SET {sets} WHERE {pk}=:__pk", __pk=pkv, **vals)
+                diff = [c for c in display_cols if before is not None and not same(disp[c], before[c])]
+                for c in (diff or ["row"]):
+                    audit.log("changed", table, pkv, did_id=pkv if table == "dids" else None, old=(before or {}).get(c) if diff else None,
+                              new=disp.get(c) if diff else None, detail=f"{label}: {c}")
                 done["changed"] += 1
         except Exception as e:
             msg = str(e).split("\n")[0][:200]
@@ -224,6 +239,7 @@ def save_table(table, orig, edited, display_cols, pk="id", transform=None, requi
         for pkv in set(orig_rows) - seen:
             try:
                 db.x(f"DELETE FROM {table} WHERE {pk}=:p", p=pkv)
+                audit.log("deleted", table, pkv, did_id=pkv if table == "dids" else None, old=json.dumps(orig_rows.get(pkv), default=str)[:500])
                 done["deleted"] += 1
             except Exception as e:
                 done["errors"].append(f"{orig_rows[pkv].get('name') or pkv}: cannot delete ({str(e)[:80]}) - set its status instead")
@@ -1734,6 +1750,8 @@ def page_log():
             for r in sn:
                 if r["what"] in pick:
                     db.x("DELETE FROM snoozes WHERE entity_key=:k", k=r["entity_key"])
+                    _k = str(r["entity_key"])
+                    audit.log("followup_resumed", "snooze", _k, did_id=int(_k[4:]) if _k.startswith("did:") and _k[4:].isdigit() else None, detail=r["what"])
             set_flash("flash_log", "ok", f"Resumed {len(pick)}.")
             st.rerun()
 
@@ -1818,8 +1836,129 @@ def page_sync():
 
 
 # ================================================================== SETTINGS
+def page_archive():
+    st.caption("Every e-mail the app sent (from now on, and all earlier sent alerts) and every reply it read (from now on, in full). "
+               "Older replies keep their short form: they cannot be recovered.")
+    f1, f2, f3, f4 = st.columns([1, 1, 2, 1])
+    direction = f1.selectbox("Direction", ["All", "Sent by the app (out)", "Replies received (in)"], key="arc_dir")
+    status = f2.selectbox("Status", ["All", "sent", "failed", "retrying", "dry_run", "pending", "received"], key="arc_status")
+    text = f3.text_input("Search subject, address or text", key="arc_q")
+    code = f4.text_input("Alert code", key="arc_code", placeholder="#A306")
+    where, p = [], {}
+    if direction.startswith("Sent"):
+        where.append("direction='out'")
+    elif direction.startswith("Replies"):
+        where.append("direction='in'")
+    if status != "All":
+        where.append("delivery_status=:st"); p["st"] = status
+    if text.strip():
+        where.append("(LOWER(COALESCE(subject,'')) LIKE :q OR LOWER(COALESCE(from_email,'')) LIKE :q OR LOWER(COALESCE(to_emails,'')) LIKE :q "
+                     "OR LOWER(COALESCE(body_text,'')) LIKE :q)")
+        p["q"] = search._like(text.strip())
+    cm = search.CODE.match(code or "")
+    if cm:
+        where.append("alert_id IN (SELECT id FROM alerts WHERE id=:cid OR thread_id=:cid)"); p["cid"] = int(cm.group(1))
+    wsql = (" WHERE " + " AND ".join(where)) if where else ""
+    total = db.q1("SELECT COUNT(*) AS n FROM email_archive" + wsql, **p)["n"]
+    size = 50
+    pages_n = max((total + size - 1) // size, 1)
+    pg = st.number_input(f"Page (of {pages_n}, {total:,} e-mails)", 1, pages_n, 1, key="arc_page")
+    rows = db.q("SELECT id, direction, alert_id, subject, from_email, to_emails, mail_date, delivery_status, error, outcome FROM email_archive" + wsql +
+                " ORDER BY COALESCE(mail_date, created_at) DESC, id DESC LIMIT :n OFFSET :o", n=size, o=(int(pg) - 1) * size, **p)
+    if not rows:
+        st.info("No e-mails match.")
+        return
+    df = pd.DataFrame([{"id": r["id"], "when": fmt(r["mail_date"]), "dir": "OUT" if r["direction"] == "out" else "IN", "alert": f"#A{r['alert_id']}" if r["alert_id"] else "",
+                        "status": r["delivery_status"], "subject": r["subject"], "from": r["from_email"], "to": r["to_emails"], "error": r["error"], "outcome": r["outcome"]} for r in rows])
+    show_df("email_archive", df)
+    full = db.q("SELECT * FROM email_archive" + wsql + " ORDER BY COALESCE(mail_date, created_at) DESC, id DESC", **p)
+    st.download_button(f"⬇️ Download all {len(full):,} matching e-mails (full text) as CSV",
+                       pd.DataFrame(full).drop(columns=["body_html"], errors="ignore").to_csv(index=False), "email_archive_full.csv", "text/csv", key="dl_arc_full")
+    pick = st.selectbox("Open one e-mail (full)", [r["id"] for r in rows], format_func=lambda i: next(f"{('OUT' if r['direction']=='out' else 'IN')} - {r['subject']}" for r in rows if r["id"] == i), key="arc_pick")
+    e = db.q1("SELECT * FROM email_archive WHERE id=:i", i=pick)
+    if e:
+        st.markdown(f"**Subject:** {e['subject']}  \n**From:** {e['from_email'] or '-'}  \n**To:** {e['to_emails'] or '-'}  \n**Cc:** {e['cc_emails'] or '-'}  \n"
+                    f"**Date:** {fmt(e['mail_date'])}  \n**Status:** {e['delivery_status']}  \n**Message-ID:** `{e['message_id']}`  \n"
+                    f"**Reply to:** {e['in_reply_to'] or '-'}  \n**Alert:** {('#A' + str(e['alert_id'])) if e['alert_id'] else '-'}")
+        if e.get("attachments"):
+            st.caption("Attachments: " + str(e["attachments"]))
+        if e.get("error"):
+            st.error(e["error"])
+        if e.get("body_html"):
+            mail_preview(e["body_html"], e.get("body_text"))
+        else:
+            st.code(e.get("body_text") or "", language=None)
+
+
+def page_audit():
+    st.caption("Who changed what, the old value, the new value and when. Written automatically for status changes, DID and table edits, "
+               "pauses and resumes, retirements, deleted alerts and task actions.")
+    f1, f2, f3, f4 = st.columns(4)
+    who = f1.text_input("Who", key="aud_who")
+    act = f2.text_input("Action contains", key="aud_act", placeholder="status_change")
+    code = f3.text_input("Alert code", key="aud_code", placeholder="#A306")
+    did = f4.text_input("DID id", key="aud_did")
+    rows = audit.recent(5000)
+    if who.strip():
+        rows = [r for r in rows if who.strip().lower() in str(r["actor"] or "").lower()]
+    if act.strip():
+        rows = [r for r in rows if act.strip().lower() in str(r["action"] or "").lower() or act.strip().lower() in str(r["entity_type"] or "").lower()]
+    cm = search.CODE.match(code or "")
+    if cm:
+        rows = [r for r in rows if r["alert_id"] == int(cm.group(1))]
+    if did.strip().isdigit():
+        rows = [r for r in rows if r["did_id"] == int(did.strip())]
+    if not rows:
+        st.info("Nothing recorded yet (or nothing matches).")
+        return
+    df = pd.DataFrame([{"when": fmt(r["at"]), "who": r["actor"], "action": r["action"], "on": r["entity_type"], "ref": r["entity_id"],
+                        "alert": f"#A{r['alert_id']}" if r["alert_id"] else "", "did_id": r["did_id"], "before": r["old_value"], "after": r["new_value"], "detail": r["detail"]} for r in rows])
+    show_df("audit_log", df)
+
+
+def users_section():
+    st.subheader("Users (name + PIN login)")
+    st.caption("When at least one user exists, the app asks for name + PIN. Create your own admin FIRST. The secret ADMIN_PIN (optional) always opens the user "
+               "'admin', so you can never be locked out. PINs are stored scrambled, nobody can read them.")
+    us = auth.users()
+    if us:
+        show_df("users", pd.DataFrame([{"name": u["name"], "role": u["role"], "active": bool(u["active"]), "created": fmt(u["created_at"])} for u in us]))
+    with st.form("user_add", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        nm = c1.text_input("Name")
+        pin = c2.text_input("PIN (4+ characters)", type="password")
+        role = c3.selectbox("Role", ["admin", "user"])
+        if st.form_submit_button("Add user"):
+            try:
+                auth.create_user(nm, pin, role); auth.forget_cache()
+                audit.log("user_added", "user", nm, new=role)
+                st.success("User added." + ("" if us else " Login is now required: you will be asked for name + PIN on the next page load."))
+            except ValueError as e:
+                st.error(str(e))
+    if us:
+        c1, c2, c3 = st.columns(3)
+        who = c1.selectbox("User", [u["name"] for u in us], key="usr_pick")
+        newpin = c2.text_input("New PIN", type="password", key="usr_newpin")
+        if c3.button("Change PIN", key="usr_setpin"):
+            try:
+                auth.set_pin(who, newpin); audit.log("user_pin_changed", "user", who); st.success("PIN changed.")
+            except ValueError as e:
+                st.error(str(e))
+        d1, d2 = st.columns(2)
+        if d1.button("Switch on / off", key="usr_toggle"):
+            cur = next(u for u in us if u["name"] == who)
+            auth.set_active(who, not cur["active"]); auth.forget_cache(); audit.log("user_active", "user", who, new=str(not cur["active"])); st.rerun()
+        if d2.button("Delete user", key="usr_del"):
+            if len(us) <= 1 and not auth.admin_pin():
+                st.error("This is the only user. Add another one first (or set ADMIN_PIN).")
+            else:
+                auth.delete_user(who); auth.forget_cache(); audit.log("user_deleted", "user", who); st.rerun()
+
+
 def page_settings():
     flash("flash_settings")
+    users_section()
+    st.divider()
     st.subheader("General")
     with st.form("settings_form"):
         c1, c2 = st.columns(2)
@@ -2476,7 +2615,64 @@ def page_schedule():
 PAGES = {"📊 Dashboard": page_dashboard, "🎛️ Cap overview": page_cap_overview, "📅 Follow-ups": page_followups, "🗓️ Schedule": page_schedule, "📑 Reports": page_reports, "🧑‍💼 Publishers": page_publishers,
          "🏢 Buyers": page_buyers, "📞 DIDs": page_dids, "🚦 Caps": page_caps, "✅ My Tasks": page_tasks, "✉️ Emails": page_emails,
          "📝 Email templates": page_templates, "📜 Alert Log": page_log, "🔄 Sync & Import": page_sync,
-         "⚙️ Settings": page_settings}
+         "🗂️ Email archive": page_archive, "🧾 Audit log": page_audit, "⚙️ Settings": page_settings}
+
+LOGIN_ON = auth.login_required()
+if LOGIN_ON and not st.session_state.get("user"):
+    st.title("📞 Pay-Per-Call Alert Center")
+    st.subheader("🔐 Sign in")
+    with st.form("login_form"):
+        ln = st.text_input("Name")
+        lp = st.text_input("PIN", type="password")
+        go_login = st.form_submit_button("Sign in", type="primary")
+    if go_login:
+        u = auth.check(ln, lp)
+        if u:
+            st.session_state["user"] = u["name"]
+            st.session_state["user_role"] = u["role"]
+            audit.log("login", "user", u["name"], who=u["name"])
+            st.rerun()
+        else:
+            st.error("Wrong name or PIN.")
+    st.stop()
+if not LOGIN_ON:
+    st.session_state.setdefault("user", "admin (no login)")
+
+
+def open_alert_cb(alert_id):
+    st.session_state["page"] = "📜 Alert Log"
+    st.session_state["log_code"] = f"#A{alert_id}"
+    st.session_state["gsearch"] = ""
+
+
+def universal_search():
+    q = st.text_input("🔎 Search everything: alert (A325, 325, #A325), DID number, publisher, buyer, e-mail address, subject",
+                      key="gsearch", placeholder="A325   |   +1555...   |   publisher name   |   name@email.com")
+    if not (q or "").strip():
+        return
+    try:
+        res = search.search(q)
+    except Exception as e:
+        st.error(f"Search failed: {e}")
+        return
+    n = len(res["alerts"]) + len(res["dids"]) + len(res["publishers"]) + len(res["buyers"])
+    if not n:
+        st.info("Nothing found.")
+        return
+    with st.container(border=True):
+        if res["dids"]:
+            st.caption("📞 DIDs: " + "  |  ".join(f"{d['number']} ({d['status']})" + (f" {d['label']}" if d["label"] else "") for d in res["dids"][:10]))
+        if res["publishers"]:
+            st.caption("🧑‍💼 Publishers: " + ", ".join(p["name"] for p in res["publishers"][:10]))
+        if res["buyers"]:
+            st.caption("🏢 Buyers: " + ", ".join(b["name"] for b in res["buyers"][:10]))
+        if res["alerts"]:
+            st.markdown(f"**Alerts found: {len(res['alerts'])}** (press Open to see the whole conversation)")
+        for r in res["alerts"][:25]:
+            c1, c2 = st.columns([6, 1])
+            c1.markdown(f"**#A{r['thread_id'] or r['id']}** · {fmt(r['created_at'])} · {r['status']} · {cases.label(r['case_status'])}  \n{r['subject']}")
+            c2.button("Open", key=f"gs_open_{r['id']}", on_click=open_alert_cb, args=(r["thread_id"] or r["id"],))
+
 
 if mailer.is_dry_run():
     st.warning("🧪 DRY RUN is ON: alerts are created but emails are NOT really sent. Turn it off in Settings when you are ready.")
@@ -2490,7 +2686,14 @@ if rc_.button("🔄 Refresh", key="refresh_page", help="Reload this page with th
     except Exception:
         pass
     st.rerun()
-st.caption(f"Page loaded {tasks_tz_now()}")
+ucol1, ucol2 = st.columns([6, 1])
+ucol1.caption(f"Page loaded {tasks_tz_now()}  ·  👤 {st.session_state.get('user')}")
+if LOGIN_ON and ucol2.button("Sign out", key="signout"):
+    audit.log("logout", "user", st.session_state.get("user"))
+    for _k in ("user", "user_role"):
+        st.session_state.pop(_k, None)
+    st.rerun()
+universal_search()
 try:
     PAGES[page]()
 except Exception as e:  # show errors on screen instead of a blank page

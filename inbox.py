@@ -13,6 +13,7 @@ from email.header import decode_header, make_header
 from email.utils import parseaddr
 
 import alerts
+import archive
 import cases
 import config
 import db
@@ -120,6 +121,7 @@ def sync_replies(days=14, scan=300, max_seconds=45):
                                          "effect_text": "Saved as a follow-up note on the alert.",
                                          "history": alerts.answer_history(aid)}, thread_id=aid, cc_extra=[addr])
                     outcome = "saved"
+            archive.record_in(msg, mid, aid, outcome)
             db.x("INSERT INTO inbound_emails (message_id, alert_id, from_email, outcome, received_at) VALUES (:m,:a,:f,:o,:n)",
                  m=mid, a=aid, f=addr, o=outcome, n=db.now_utc())
             res["saved" if outcome == "saved" else "ignored"] += 1
