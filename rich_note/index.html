@@ -89,7 +89,7 @@ function emit(force){
   lastSent = h;
   send("setComponentValue", {value: h, dataType: "json"});
 }
-function scheduleEmit(){ clearTimeout(timer); timer = setTimeout(function(){ emit(false); }, 100); }
+function scheduleEmit(){ clearTimeout(timer); timer = setTimeout(function(){ emit(false); }, 30); }
 
 /* ---------------------------------------------------------------- helpers */
 function escHtml(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -449,6 +449,10 @@ ed.addEventListener("keydown", function(e){
 });
 ed.addEventListener("input", function(){ ensureNotEmpty(); updateEmpty(); scheduleEmit(); updateState(); });
 ed.addEventListener("blur", function(){ emit(false); });
+ed.addEventListener("focusout", function(){ emit(false); });
+ed.addEventListener("keyup", function(){ emit(false); });
+document.addEventListener("mouseleave", function(){ emit(false); });
+window.addEventListener("blur", function(){ emit(false); });
 window.addEventListener("pagehide", function(){ emit(false); });
 
 /* ---------------------------------------------------------------- toolbar */
