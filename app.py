@@ -1957,7 +1957,7 @@ def page_tasks():
     with st.form("task_add_form", border=True):
         st.text_input("Task subject (this becomes the e-mail subject)", key="task_title", placeholder="For example: Call Rehab buyer about the cap")
         st.markdown("**Details: what to do** (optional)")
-        richnote.rich_note("", key=note_key, height=320)
+        note_now = richnote.rich_note("", key=note_key, height=320)
         st.text_input("CC e-mails for this task (optional)", key="task_cc", placeholder="john@company.com, mary@company.com",
                       help="These people get a copy of this task's alert and follow-up e-mails. Separate with commas. You can change it later.")
         c1, c2, c3 = st.columns(3)
@@ -1988,9 +1988,15 @@ def page_tasks():
         b2.form_submit_button("➕ Add task", type="primary", on_click=add_task_cb)
     pv = st.session_state.get("task_preview")
     if pv:
+        pv = dict(pv)
+        if not tasks.note_text(pv.get("notes")) and tasks.note_text(note_now):
+            pv["notes"] = note_now                     # the box value that arrived with this page run
         subj, html_p, plain_p = tasks.preview_email([pv])
         with st.container(border=True):
             st.markdown("**👁 This is how your alert e-mail will look**")
+            if not tasks.note_text(pv.get("notes")):
+                st.warning("The Details box is EMPTY in this preview. If you wrote details, click inside the box, then press "
+                           "**Preview e-mail** again. (If it is still empty, tell me.)")
             st.markdown(f"**Subject:** {subj}")
             mail_preview(html_p, plain_p)
             if st.button("Close preview", key="task_pv_close"):
@@ -2118,14 +2124,19 @@ def page_tasks():
                 st.text_input("Task subject", cur["title"], key=f"task_edit_title_{pick}_{ev}")
                 st.text_input("CC e-mails for this task (empty = nobody)", cur.get("cc_emails") or "", key=f"task_edit_cc_{pick}_{ev}",
                               help="Separate with commas. Applies to the next alert and follow-ups of this task.")
-                richnote.rich_note(init, key=nk, height=320)
+                note_now_e = richnote.rich_note(init, key=nk, height=320)
                 e1, e2 = st.columns(2)
                 e1.form_submit_button("👁 Preview e-mail", on_click=edit_pv_cb)
                 e2.form_submit_button("💾 Save this task", type="primary", on_click=edit_cb)
             ep = st.session_state.get("task_edit_preview")
             if ep:
+                ep = dict(ep)
+                if not tasks.note_text(ep.get("notes")) and tasks.note_text(note_now_e):
+                    ep["notes"] = note_now_e
                 subj, html_p, plain_p = tasks.preview_email([ep])
                 with st.container(border=True):
+                    if not tasks.note_text(ep.get("notes")):
+                        st.warning("The Details box is EMPTY in this preview. Click inside the box and press Preview again.")
                     st.markdown(f"**Subject:** {subj}")
                     mail_preview(html_p, plain_p)
 
