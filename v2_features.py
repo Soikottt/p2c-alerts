@@ -70,6 +70,17 @@ def ensure_schema():
         """CREATE TABLE IF NOT EXISTS app_users (
             id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL, pin_hash TEXT NOT NULL, salt TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'user', active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+
+        # work queue: assignment, saved views, reply templates (see workq.py)
+        "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS assigned_to TEXT",
+        "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ",
+        "ALTER TABLE alerts ADD COLUMN IF NOT EXISTS due_notified_at TIMESTAMPTZ",
+        "CREATE INDEX IF NOT EXISTS ix_alerts_assigned ON alerts (assigned_to, due_at)",
+        """CREATE TABLE IF NOT EXISTS saved_views (
+            id SERIAL PRIMARY KEY, owner TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, filters TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE TABLE IF NOT EXISTS reply_templates (
+            id SERIAL PRIMARY KEY, name TEXT NOT NULL, body TEXT NOT NULL, set_status TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
     ]
 
     for sql in statements:
@@ -113,37 +124,76 @@ def _esc_like(s):
     return str(s).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def search_alerts(query, limit=80):
+def search_alerts(query, limit=80, filters=None, me=None):
     """A325, 325, #A325 -> that alert (and its follow-ups). Anything else: DID number, publisher, buyer, e-mail address,
-    subject or e-mail text (alerts AND archived replies)."""
+    subject or e-mail text (alerts AND archived replies). `filters` (see workq.py) narrow the result by status / person / overdue / age."""
+    import workq
     q = (query or '').strip()
-    if not q:
+    now = db.now_utc()
+    if filters is not None:
+        fsql, fp = workq.filters_sql(filters, me, now)
+    else:
+        fsql, fp = "", {}
+    if not q and filters is None:
         return []
-    m = _CODE.match(q)
+    m = _CODE.match(q) if q else None
     exact_id = int(m.group(1)) if m else -1
     like = f"%{_esc_like(q)}%"
     digits = re.sub(r'[^0-9]', '', q)
     dig_like = f"%{digits}%" if len(digits) >= 5 else "%@@no-digits@@%"
     base = """SELECT a.id, a.thread_id, a.alert_type, a.subject, a.status, a.case_status,
-                     a.created_at, a.sent_at, a.to_emails, a.cc_emails, a.last_error,
+                     a.created_at, a.sent_at, a.to_emails, a.cc_emails, a.last_error, a.assigned_to, a.due_at,
                      d.number AS did, COALESCE(p.name, d.affiliate_name, '') AS publisher
               FROM alerts a
               LEFT JOIN dids d ON d.id = CASE WHEN split_part(COALESCE(a.snooze_key,''), ':', 1)='did'
                    AND split_part(COALESCE(a.snooze_key,''), ':', 2) ~ '^[0-9]+$'
                    THEN split_part(a.snooze_key, ':', 2)::INTEGER ELSE NULL END
               LEFT JOIN publishers p ON p.id=d.publisher_id """
+    if not q:
+        return db.q(base + "WHERE 1=1" + fsql + " ORDER BY a.created_at DESC LIMIT :lim", lim=int(limit), **fp)
     if m:
-        sql = base + """WHERE a.id=:exact OR a.thread_id=:exact ORDER BY CASE WHEN a.id=:exact THEN 0 ELSE 1 END, a.id LIMIT :lim"""
-        return db.q(sql, exact=exact_id, lim=int(limit))
-    sql = base + """WHERE a.subject ILIKE :like ESCAPE '\\' OR COALESCE(a.body,'') ILIKE :like ESCAPE '\\'
+        sql = base + "WHERE (a.id=:exact OR a.thread_id=:exact)" + fsql + " ORDER BY CASE WHEN a.id=:exact THEN 0 ELSE 1 END, a.id LIMIT :lim"
+        return db.q(sql, exact=exact_id, lim=int(limit), **fp)
+    sql = base + """WHERE (a.subject ILIKE :like ESCAPE '\\' OR COALESCE(a.body,'') ILIKE :like ESCAPE '\\'
                  OR COALESCE(a.to_emails,'') ILIKE :like ESCAPE '\\' OR COALESCE(a.cc_emails,'') ILIKE :like ESCAPE '\\'
                  OR COALESCE(d.number,'') ILIKE :like ESCAPE '\\' OR COALESCE(p.name,d.affiliate_name,'') ILIKE :like ESCAPE '\\'
                  OR REGEXP_REPLACE(COALESCE(d.number,''), '[^0-9]', '', 'g') LIKE :dig
                  OR a.id IN (SELECT alert_id FROM email_archive WHERE alert_id IS NOT NULL AND
                              (COALESCE(subject,'') ILIKE :like ESCAPE '\\' OR COALESCE(from_email,'') ILIKE :like ESCAPE '\\'
-                              OR COALESCE(to_emails,'') ILIKE :like ESCAPE '\\' OR COALESCE(body_text,'') ILIKE :like ESCAPE '\\'))
-              ORDER BY a.created_at DESC LIMIT :lim"""
-    return db.q(sql, like=like, dig=dig_like, lim=int(limit))
+                              OR COALESCE(to_emails,'') ILIKE :like ESCAPE '\\' OR COALESCE(body_text,'') ILIKE :like ESCAPE '\\')))""" + fsql + \
+          " ORDER BY a.created_at DESC LIMIT :lim"
+    return db.q(sql, like=like, dig=dig_like, lim=int(limit), **fp)
+
+
+def global_search(query, per_kind=6):
+    """One box for everything: alerts, DIDs, publishers, buyers. -> list of {kind, id, title, sub}."""
+    q = (query or '').strip()
+    if len(q) < 2:
+        return []
+    out = []
+    try:
+        for r in search_alerts(q, per_kind):
+            out.append({'kind': 'alert', 'id': int(r['id']), 'title': f"A{r['id']} · {r.get('publisher') or r.get('alert_type') or 'Alert'}",
+                        'sub': (r.get('subject') or '')[:70]})
+    except Exception:
+        pass
+    like, digits = f"%{_esc_like(q)}%", re.sub(r'[^0-9]', '', q)
+    dig = f"%{digits}%" if len(digits) >= 4 else "%@@none@@%"
+    try:
+        for r in db.q("""SELECT d.id, d.number, d.label, COALESCE(p.name, d.affiliate_name, '') AS pub FROM dids d LEFT JOIN publishers p ON p.id=d.publisher_id
+                         WHERE d.number ILIKE :l ESCAPE '\\' OR COALESCE(d.label,'') ILIKE :l ESCAPE '\\'
+                            OR REPLACE(REPLACE(REPLACE(d.number,'+',''),'-',''),' ','') LIKE :dg
+                         ORDER BY d.number LIMIT :n""", l=like, dg=dig, n=per_kind):
+            out.append({'kind': 'did', 'id': int(r['id']), 'title': f"DID {r['number']}", 'sub': f"{r['pub']} {r.get('label') or ''}".strip(), 'number': r['number']})
+    except Exception:
+        pass
+    for kind, table in (('publisher', 'publishers'), ('buyer', 'buyers')):
+        try:
+            for r in db.q(f"SELECT id, name FROM {table} WHERE name ILIKE :l ESCAPE '\\' ORDER BY name LIMIT :n", l=like, n=per_kind):
+                out.append({'kind': kind, 'id': int(r['id']), 'title': f"{kind.title()} {r['name']}", 'sub': '', 'name': r['name']})
+        except Exception:
+            pass
+    return out
 
 
 def alert_details(alert_id):

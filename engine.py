@@ -18,6 +18,7 @@ import dids
 import inbox
 import ingest
 import mailer
+import notify
 import rules
 import pubcaps
 import insights
@@ -246,6 +247,13 @@ def run_once(log=_emit, time_limit=None):
             say(f"backup emailed to the admin ({b})" if b else "backup: not due")
         except Exception as e:
             say(f"backup email FAILED: {e}")
+    # ---- 7. Telegram alerts + daily summary e-mail (optional)
+    if elapsed() < limit:
+        step("Telegram alerts and the daily summary")
+        try:
+            notify.run(now, say)
+        except Exception as e:
+            say(f"notifications FAILED: {e}")
     CURRENT["step"] = "finished"
     say(db.stats_text())
     say(f"done in {elapsed():.1f}s" + ("" if ok else " (with errors)"))

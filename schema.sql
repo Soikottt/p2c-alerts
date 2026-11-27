@@ -137,6 +137,9 @@ CREATE TABLE IF NOT EXISTS alerts (
   response_note TEXT,
   case_status TEXT DEFAULT 'open',
   case_updated_at TIMESTAMPTZ,
+  assigned_to TEXT,
+  due_at TIMESTAMPTZ,
+  due_notified_at TIMESTAMPTZ,
   thread_id INTEGER,
   claimed_at TIMESTAMPTZ,
   sent_to TEXT
@@ -362,4 +365,13 @@ CREATE TABLE IF NOT EXISTS app_users (
   role TEXT NOT NULL DEFAULT 'user',
   active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS saved_views (
+  id SERIAL PRIMARY KEY, owner TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, filters TEXT NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS reply_templates (
+  id SERIAL PRIMARY KEY, name TEXT NOT NULL, body TEXT NOT NULL, set_status TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

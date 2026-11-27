@@ -87,6 +87,94 @@ def _since_choice(key, default="30 days"):
     return db.now_utc() - timedelta(days=opts[pick]), pick
 
 
+
+# ---------------------------------------------------------------- Filters, saved views
+def _apply_filters(prefix, f):
+    import workq
+    f = {**workq.DEFAULT_FILTERS, **(f or {})}
+    st.session_state[f"{prefix}_case"] = list(f["case"])
+    st.session_state[f"{prefix}_email"] = f["email"]
+    st.session_state[f"{prefix}_asg"] = f["asg"]
+    st.session_state[f"{prefix}_ovd"] = bool(f["ovd"])
+    st.session_state[f"{prefix}_open"] = bool(f["open_only"])
+    st.session_state[f"{prefix}_days"] = int(f["days"])
+
+
+def _apply_view(prefix):
+    import json
+    import workq
+    vid = st.session_state.get(f"{prefix}_viewpick")
+    for r in workq.views_list(_me()):
+        if r["id"] == vid:
+            try:
+                _apply_filters(prefix, json.loads(r["filters"]))
+            except Exception:
+                pass
+
+
+def filter_bar(prefix):
+    """Quick presets + filters + saved views. Returns the filters dict (see workq.filters_sql)."""
+    import json
+    import workq
+    me = _me()
+    st.session_state.setdefault(f"{prefix}_case", [])
+    st.session_state.setdefault(f"{prefix}_email", "")
+    st.session_state.setdefault(f"{prefix}_asg", "Anyone")
+    st.session_state.setdefault(f"{prefix}_ovd", False)
+    st.session_state.setdefault(f"{prefix}_open", False)
+    st.session_state.setdefault(f"{prefix}_days", 0)
+    cols = st.columns(len(workq.PRESETS) + 1)
+    for col, (name, preset) in zip(cols, workq.PRESETS.items()):
+        col.button(name, key=f"{prefix}_pre_{name}", use_container_width=True, on_click=_apply_filters, args=(prefix, preset))
+    cols[-1].button("Clear", key=f"{prefix}_pre_clear", use_container_width=True, on_click=_apply_filters, args=(prefix, workq.DEFAULT_FILTERS))
+    people = ["Anyone", "Me", "Unassigned"] + workq.people()
+    cur = st.session_state.get(f"{prefix}_asg")
+    if cur and cur not in people:
+        people.append(cur)
+    with st.expander("Filters and saved views", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        c1.multiselect("Team status", cases.STATUSES, format_func=cases.label, key=f"{prefix}_case")
+        c2.selectbox("E-mail status", ["", "pending", "sent", "failed", "dry_run"], format_func=lambda s: s or "Any", key=f"{prefix}_email")
+        c3.selectbox("Assigned to", people, key=f"{prefix}_asg")
+        d1, d2, d3 = st.columns(3)
+        d1.checkbox("Overdue only", key=f"{prefix}_ovd")
+        d2.checkbox("Hide closed (done / no action)", key=f"{prefix}_open")
+        d3.selectbox("Created", [0, 1, 7, 30, 90], format_func=lambda n: "Any time" if not n else f"Last {n} days", key=f"{prefix}_days")
+        views = workq.views_list(me)
+        if views:
+            v1, v2c, v3 = st.columns([3, 1, 1])
+            v1.selectbox("Saved views", [r["id"] for r in views], format_func=lambda i: next((r["name"] + (" (shared)" if not r["owner"] else "") for r in views if r["id"] == i), ""),
+                         key=f"{prefix}_viewpick")
+            v2c.write(""); v2c.write("")
+            v2c.button("Apply", key=f"{prefix}_viewapply", on_click=_apply_view, args=(prefix,), use_container_width=True)
+            v3.write(""); v3.write("")
+            if v3.button("Delete", key=f"{prefix}_viewdel", use_container_width=True):
+                workq.view_delete(st.session_state.get(f"{prefix}_viewpick"), me)
+                st.rerun()
+    flt = {"case": st.session_state[f"{prefix}_case"], "email": st.session_state[f"{prefix}_email"], "asg": st.session_state[f"{prefix}_asg"],
+           "ovd": st.session_state[f"{prefix}_ovd"], "open_only": st.session_state[f"{prefix}_open"], "days": st.session_state[f"{prefix}_days"]}
+    with st.expander("Save this filter as a view"):
+        n1, n2, n3 = st.columns([3, 1, 1])
+        vname = n1.text_input("View name", key=f"{prefix}_vname", label_visibility="collapsed", placeholder="Name, e.g. 'Rehab overdue'")
+        shared = n2.checkbox("Share", key=f"{prefix}_vshare", help="Everyone can use it")
+        n3.write("")
+        if n3.button("Save view", key=f"{prefix}_vsave", use_container_width=True):
+            if workq.view_save(me, vname, flt, shared):
+                st.success("Saved. Pick it under 'Filters and saved views'.")
+            else:
+                st.warning("Give the view a name first.")
+    return flt
+
+
+def _assigned_chip(r):
+    who = r.get("assigned_to")
+    if not who:
+        return ""
+    due = db.to_dt(r.get("due_at")) if r.get("due_at") else None
+    late = bool(due and due < db.now_utc())
+    return f"{who}" + (f" · due {fmt(due, False)}" if due else "") + (" ⚠️" if late else "")
+
+
 # ---------------------------------------------------------------- Alert Center
 def _email_card(a, expanded_key):
     status = a.get('status') or 'unknown'
@@ -129,7 +217,8 @@ def _inbound_card(mail, key):
 def _row_from_details(a):
     return {'id': a['id'], 'thread_id': a.get('thread_id'), 'alert_type': a.get('alert_type'), 'subject': a.get('subject'),
             'status': a.get('status'), 'case_status': a.get('case_status'), 'created_at': a.get('created_at'),
-            'sent_at': a.get('sent_at'), 'did': a.get('did'), 'publisher': a.get('publisher_name')}
+            'sent_at': a.get('sent_at'), 'did': a.get('did'), 'publisher': a.get('publisher_name'),
+            'assigned_to': a.get('assigned_to'), 'due_at': a.get('due_at')}
 
 
 def page_alert_center():
@@ -144,13 +233,8 @@ def page_alert_center():
         st.write("")
         st.write("")
         st.button("Search", key="v2_search_button", use_container_width=True)
-    if query.strip():
-        results = v2.search_alerts(query, 100)
-    else:
-        results = db.q("""SELECT a.id,a.thread_id,a.alert_type,a.subject,a.status,a.case_status,a.created_at,a.sent_at,
-                            a.to_emails,a.cc_emails,a.last_error,d.number AS did,COALESCE(p.name,d.affiliate_name,'') AS publisher
-                     FROM alerts a LEFT JOIN dids d ON d.id=CASE WHEN split_part(COALESCE(a.snooze_key,''),':',1)='did' AND split_part(COALESCE(a.snooze_key,''),':',2) ~ '^[0-9]+$' THEN split_part(a.snooze_key,':',2)::INTEGER ELSE NULL END
-                     LEFT JOIN publishers p ON p.id=d.publisher_id ORDER BY a.created_at DESC LIMIT 100""")
+    flt = filter_bar('ac')
+    results = v2.search_alerts(query, 100, filters=flt, me=_me())
     selected = st.session_state.get('v2_selected_alert_id')
     selected = int(selected) if selected else None
     ids = [int(r['id']) for r in results]
@@ -177,6 +261,8 @@ def page_alert_center():
                 c1.markdown(f"**A{r['id']} · {r.get('publisher') or r.get('alert_type') or 'Alert'}**")
                 c1.caption(f"{r.get('did') or 'No DID'} · {fmt(r.get('created_at'))}")
                 c1.write(r.get('subject') or '')
+                if r.get('assigned_to'):
+                    c1.caption("👤 " + _assigned_chip(r))
                 c2.markdown(f":{_colour(r.get('status'))}[{str(r.get('status') or '').replace('_', ' ').title()}]")
                 if c2.button("Open" if not active else "Opened", key=f"v2_open_{r['id']}", disabled=active, use_container_width=True):
                     st.session_state['v2_selected_alert_id'] = int(r['id'])
@@ -195,6 +281,9 @@ def page_alert_center():
         m1.metric("Emails", len([x for x in mails if x.get('alert_type') != 'alert_response']))
         m2.metric("Activities", len(events))
         m3.metric("Team status", cases.label(a.get('case_status')))
+        st.caption("👤 " + (_assigned_chip(a) or "Not assigned"))
+        with st.expander("Assign / due time"):
+            _assign_form(a)
         tab_all, tab_emails, tab_replies, tab_notes = st.tabs(["All activity", "Emails", "Replies", "Notes & status"])
         cap = st.session_state.get(f"v2_tl_cap_{root}", 40)
 
@@ -242,12 +331,17 @@ def page_alert_center():
         with tab_notes:
             show_timeline('notes')
         with st.expander("Add internal note / update status"):
+            import workq
+            tpls = workq.replies_list()
+            st.selectbox("Reply template (fills the note)", [""] + [t["name"] for t in tpls], format_func=lambda s: s or "No template", key=f"v2_tplpick_{selected}",
+                         on_change=_use_reply, args=(selected, a.get('did'), a.get('publisher_name')))
+            current = a.get('case_status') or 'open'
+            status_values = cases.STATUSES
+            st.session_state.setdefault(f"v2_note_status_{selected}", current if current in status_values else status_values[0])
+            st.session_state.setdefault(f"v2_note_text_{selected}", "")
             with st.form(f"v2_note_{selected}"):
                 who = st.text_input("Your name", value=_me(), key=f"v2_note_who_{selected}")
-                status_values = cases.STATUSES
-                current = a.get('case_status') or 'open'
-                status = st.selectbox("Team status", status_values, index=status_values.index(current) if current in status_values else 0,
-                                      format_func=cases.label, key=f"v2_note_status_{selected}")
+                status = st.selectbox("Team status", status_values, format_func=cases.label, key=f"v2_note_status_{selected}")
                 note = st.text_area("Internal note", key=f"v2_note_text_{selected}")
                 save = st.form_submit_button("Save activity", type="primary")
             if save:
@@ -255,8 +349,43 @@ def page_alert_center():
                     st.warning("Add a note or change the status first.")
                 else:
                     cases.add_note(selected, 'team', who, note.strip() or f"Status changed to {cases.label(status)}", status if status != current else None)
+                    st.session_state[f"v2_note_text_{selected}"] = ""
                     st.success("Saved.")
                     st.rerun()
+
+
+def _use_reply(alert_id, did, publisher):
+    import workq
+    pick = st.session_state.get(f"v2_tplpick_{alert_id}")
+    t = next((r for r in workq.replies_list() if r["name"] == pick), None)
+    if t:
+        st.session_state[f"v2_note_text_{alert_id}"] = workq.reply_render(t["body"], did, publisher, alert_id)
+        if t.get("set_status") in cases.STATUSES:
+            st.session_state[f"v2_note_status_{alert_id}"] = t["set_status"]
+
+
+def _assign_form(a):
+    import workq
+    from datetime import datetime, time as dtime
+    from timeutil import tz
+    aid = int(a["id"])
+    names = [""] + workq.people()
+    if a.get("assigned_to") and a["assigned_to"] not in names:
+        names.append(a["assigned_to"])
+    with st.form(f"v2_assign_{aid}"):
+        person = st.selectbox("Assign to", names, index=names.index(a["assigned_to"]) if a.get("assigned_to") in names else 0, format_func=lambda s: s or "Nobody",
+                              key=f"v2_asg_p_{aid}")
+        has_due = st.checkbox("Set a due date", value=bool(a.get("due_at")), key=f"v2_asg_h_{aid}")
+        cur = db.to_dt(a["due_at"]).astimezone(tz()) if a.get("due_at") else (db.now_utc() + timedelta(days=1)).astimezone(tz())
+        d1, d2 = st.columns(2)
+        day = d1.date_input("Due date", value=cur.date(), key=f"v2_asg_d_{aid}")
+        hour = d2.time_input("Due time", value=cur.time().replace(second=0, microsecond=0), key=f"v2_asg_t_{aid}")
+        go = st.form_submit_button("Save assignment", type="primary")
+    if go:
+        due = datetime.combine(day, hour, tzinfo=tz()).astimezone(db.now_utc().tzinfo) if has_due else None
+        workq.assign([aid], person, due, _me())
+        st.success("Saved.")
+        st.rerun()
 
 
 # ---------------------------------------------------------------- Email Center
@@ -302,6 +431,8 @@ def page_email_center():
     with t_tpl:
         st.info("Edit the alert wording on the **📝 Email templates** page in the left menu.")
         st.button("Go to Email templates", key="v2_goto_tpl", on_click=lambda: st.session_state.__setitem__("page_v2", "📝 Email templates"))
+        st.divider()
+        reply_templates_manager()
     with t_prev:
         pool = [r for r in rows if r['direction'] == 'outbound']
         if not pool:
@@ -689,6 +820,11 @@ def page_entity_profiles(entity='publisher'):
     if not records:
         st.info(f"No {entity} records available yet.")
         return
+    want = st.session_state.pop(f"v2_pref_{entity}", None)
+    if want:
+        hit = next((r for r in records if r["name"] == want), None)
+        if hit:
+            st.session_state[f"v2_{entity}_profile"] = hit
     pick = st.selectbox(f"Select {entity}", records, format_func=lambda r: f"{r['name']} · {r['status']}", key=f"v2_{entity}_profile")
     st.subheader(pick['name'])
     c1, c2, c3 = st.columns(3)
@@ -779,6 +915,18 @@ def page_home():
     c[0].metric("Failed e-mails", len(failed)); c[1].metric("Replies to read", len(replies))
     c[2].metric("Overdue follow-ups", len(overdue)); c[3].metric("DIDs without answer", len(silent))
 
+    me = _me()
+    mine = db.q("""SELECT id, subject, due_at, case_status FROM alerts WHERE assigned_to=:m AND alert_type <> 'alert_response'
+                   AND COALESCE(case_status,'open') NOT IN ('done','no_action') ORDER BY due_at IS NULL, due_at LIMIT 10""", m=me) if me else []
+    if mine:
+        with st.container(border=True):
+            _section("Assigned to me", len(mine), "blue")
+            for r in mine:
+                a, b = st.columns([5, 1])
+                late = bool(r.get("due_at") and db.to_dt(r["due_at"]) < now)
+                a.markdown(f"**A{r['id']}** · {r['subject'] or ''}")
+                a.caption((f"due {fmt(r['due_at'])}" + (" ⚠️ overdue" if late else "")) if r.get("due_at") else "no due date")
+                b.button("Open", key=f"home_my_{r['id']}", use_container_width=True, on_click=_go, args=("🔎 Alert Center", int(r['id'])))
     left, right = st.columns(2, gap="large")
     with left:
         with st.container(border=True):
@@ -821,3 +969,156 @@ def page_home():
                 a.markdown(f"**A{r['id']}** · {r['subject'] or ''}")
                 a.caption(f"{fmt(r['created_at'])} · {cases.label(r['case_status'])}")
                 b.button("Open", key=f"home_sl_{r['id']}", use_container_width=True, on_click=_go, args=("🔎 Alert Center", int(r['id'])))
+
+
+# ---------------------------------------------------------------- Work Queue (bulk actions)
+def page_work_queue():
+    import workq
+    from datetime import datetime
+    from timeutil import tz
+    st.markdown("## Work Queue")
+    st.caption("Tick alerts, then change many at once: status, person, due date, note or a reply template.")
+    q = st.text_input("Search", key="wq_q", placeholder="A325 · DID · publisher · e-mail · subject…")
+    flt = filter_bar("wq")
+    rows = v2.search_alerts(q, 300, filters=flt, me=_me())
+    st.caption(f"{len(rows):,} alerts" + (" (showing the newest 200)" if len(rows) > 200 else ""))
+    rows = rows[:200]
+    if not rows:
+        st.info("No alerts match. Change the filters or press Clear.")
+        return
+    all_sel = st.checkbox("Select all shown", key="wq_all")
+    df = pd.DataFrame([{"Select": bool(all_sel), "Alert": f"A{r['id']}", "Subject": r.get("subject"), "DID": r.get("did") or "", "Publisher": r.get("publisher") or "",
+                        "Team": cases.label(r.get("case_status")), "E-mail": r.get("status"), "Assigned": r.get("assigned_to") or "",
+                        "Due": fmt(r["due_at"], False) if r.get("due_at") else "", "Created": fmt(r.get("created_at"), False), "_id": int(r["id"])} for r in rows])
+    sig = f"wq_ed_{int(bool(all_sel))}_{len(df)}_{rows[0]['id']}"
+    edited = st.data_editor(df, hide_index=True, use_container_width=True, key=sig, column_config={"Select": st.column_config.CheckboxColumn("Select"), "_id": None},
+                            disabled=[c for c in df.columns if c != "Select"], height=420)
+    st.download_button("⬇ CSV (all shown rows)", df.drop(columns=["Select", "_id"]).to_csv(index=False).encode("utf-8-sig"), file_name="work_queue.csv", mime="text/csv", key="wq_csv")
+    chosen = [int(i) for i in edited.loc[edited["Select"], "_id"].tolist()]
+    with st.container(border=True):
+        st.markdown(f"**Bulk action** · {len(chosen)} selected")
+        action = st.selectbox("Action", ["Set team status", "Assign to a person", "Set due date only", "Add a note", "Use a reply template"], key="wq_action")
+        who = _me()
+        payload = {}
+        if action == "Set team status":
+            payload["status"] = st.selectbox("New status", cases.STATUSES, format_func=cases.label, key="wq_status")
+            payload["note"] = st.text_input("Note (optional)", key="wq_note1")
+        elif action in ("Assign to a person", "Set due date only"):
+            if action == "Assign to a person":
+                payload["person"] = st.selectbox("Person", [""] + workq.people(), format_func=lambda s: s or "Nobody", key="wq_person")
+            has_due = st.checkbox("Set a due date", value=True, key="wq_hasdue")
+            d1, d2 = st.columns(2)
+            day = d1.date_input("Due date", value=(db.now_utc() + timedelta(days=1)).astimezone(tz()).date(), key="wq_dday")
+            hr = d2.time_input("Due time", value=datetime(2000, 1, 1, 9, 0).time(), key="wq_dtime")
+            payload["due"] = datetime.combine(day, hr, tzinfo=tz()).astimezone(db.now_utc().tzinfo) if has_due else None
+        elif action == "Add a note":
+            payload["note"] = st.text_area("Note", key="wq_note2")
+        else:
+            tpls = workq.replies_list()
+            payload["tpl"] = st.selectbox("Template", [t["id"] for t in tpls], format_func=lambda i: next(t["name"] for t in tpls if t["id"] == i), key="wq_tpl")
+            st.caption("{did}, {publisher} and {alert} are filled in for each alert.")
+        sure = st.checkbox(f"Yes, apply to all {len(chosen)} selected alerts", key="wq_sure") if len(chosen) > 20 else True
+        if st.button("Apply to selected", type="primary", key="wq_apply", disabled=not chosen or not sure):
+            n = 0
+            if action == "Set team status":
+                n = workq.bulk_status(chosen, payload["status"], who, payload.get("note"))
+            elif action == "Assign to a person":
+                n = workq.assign(chosen, payload["person"], payload["due"], who)
+            elif action == "Set due date only":
+                for aid in chosen:
+                    cur = db.q1("SELECT assigned_to FROM alerts WHERE id=:i", i=aid) or {}
+                    n += workq.assign([aid], cur.get("assigned_to"), payload["due"], who)
+            elif action == "Add a note":
+                if not (payload.get("note") or "").strip():
+                    st.warning("Write the note first.")
+                else:
+                    n = workq.bulk_note(chosen, who, payload["note"].strip())
+            else:
+                t = next(t for t in tpls if t["id"] == payload["tpl"])
+                by_id = {int(r["id"]): r for r in rows}
+                for aid in chosen:
+                    r = by_id.get(aid, {})
+                    cases.add_note(aid, "team", who, workq.reply_render(t["body"], r.get("did"), r.get("publisher"), aid), t.get("set_status") if t.get("set_status") in cases.STATUSES else None)
+                    n += 1
+            if n:
+                audit_msg = f"{action}: {n} alerts"
+                try:
+                    import audit
+                    audit.log("bulk_action", "alert", f"{n} alerts", detail=audit_msg, who=who)
+                except Exception:
+                    pass
+                st.success(f"Done: {n} alerts updated.")
+                st.rerun()
+
+
+# ---------------------------------------------------------------- Reply templates manager
+def reply_templates_manager():
+    import workq
+    tpls = workq.replies_list()
+    st.markdown("**Reply templates** (used in Alert Center notes and the Work Queue)")
+    st.caption("Use {did}, {publisher} and {alert}; they are filled in automatically.")
+    ids = [0] + [t["id"] for t in tpls]
+    pick = st.selectbox("Template", ids, format_func=lambda i: "➕ New template" if i == 0 else next(t["name"] for t in tpls if t["id"] == i), key="rt_pick")
+    cur = next((t for t in tpls if t["id"] == pick), {})
+    with st.form(f"rt_form_{pick}"):
+        name = st.text_input("Name", value=cur.get("name", ""))
+        body = st.text_area("Text", value=cur.get("body", ""), height=110)
+        opts = [""] + cases.STATUSES
+        status = st.selectbox("Also set team status to", opts, index=opts.index(cur.get("set_status")) if cur.get("set_status") in opts else 0,
+                              format_func=lambda s: "Do not change" if not s else cases.label(s))
+        c1, c2 = st.columns(2)
+        save = c1.form_submit_button("Save template", type="primary")
+        delete = c2.form_submit_button("Delete", disabled=not pick)
+    if save:
+        if workq.reply_save(name, body, status, _me(), pick or None):
+            st.success("Saved.")
+            st.rerun()
+        else:
+            st.warning("A name and a text are needed.")
+    if delete and pick:
+        workq.reply_delete(pick, _me())
+        st.rerun()
+
+
+# ---------------------------------------------------------------- Settings: Telegram + daily summary
+def settings_notifications():
+    import notify
+    st.subheader("Notifications")
+    tg = notify.telegram_configured()
+    st.markdown("**Telegram alerts** " + (":green[connected]" if tg else ":orange[not connected]"))
+    if not tg:
+        st.caption("1) In Telegram open @BotFather, send /newbot and copy the token.  2) Send any message to your new bot, then open "
+                   "https://api.telegram.org/bot<TOKEN>/getUpdates and copy the number after \"chat\":{\"id\":.  "
+                   "3) Add two secrets in Streamlit AND in GitHub (Settings → Secrets → Actions): TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.  "
+                   "4) Reload this page. (Never paste the token in code or in a chat.)")
+    c = st.columns(5)
+    flags = [("tg_on_failed", "Failed e-mails"), ("tg_on_reply", "New replies"), ("tg_on_engine", "Engine / Ringba problems"),
+             ("tg_on_due", "Overdue assigned work"), ("tg_on_summary", "Also send the daily summary")]
+    new = {}
+    for col, (k, lab) in zip(c, flags):
+        new[k] = col.checkbox(lab, value=str(db.get_setting(k, "true")).lower() == "true", key=f"set_{k}")
+    st.markdown("**Daily summary e-mail**")
+    d1, d2, d3 = st.columns([1, 1, 3])
+    on = d1.checkbox("Send every day", value=str(db.get_setting("summary_on", "false")).lower() == "true", key="set_summary_on")
+    hour = d2.number_input("At hour (0-23, your timezone)", 0, 23, int(float(db.get_setting("summary_hour", "9") or 9)), key="set_summary_hour")
+    to = d3.text_input("Send the daily summary to (comma separated; empty = admin e-mails)", db.get_setting("summary_to", ""), key="set_summary_to")
+    b1, b2, b3 = st.columns(3)
+    if b1.button("💾 Save notification settings", key="set_notif_save"):
+        for k, val in new.items():
+            db.set_setting(k, "true" if val else "false")
+        db.set_setting("summary_on", "true" if on else "false")
+        db.set_setting("summary_hour", int(hour))
+        db.set_setting("summary_to", to.strip())
+        st.success("Saved.")
+    if b2.button("Send a Telegram test", key="set_tg_test", disabled=not tg):
+        ok, msg = notify.send_telegram("P2C Alert Center: test message ✅")
+        (st.success if ok else st.error)(msg if not ok else "Sent. Check Telegram.")
+    if b3.button("Send the summary now (test)", key="set_sum_test"):
+        try:
+            ok, msg = notify.send_summary(db.now_utc())
+            (st.success if ok else st.warning)(msg)
+        except Exception as e:
+            st.error(f"Could not send: {e}")
+    with st.expander("Preview of the summary"):
+        st.text(notify.summary_text(db.now_utc()))
+    st.caption("WhatsApp is not included: it needs a paid Meta business account. Telegram is free and works the same way.")

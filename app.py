@@ -120,6 +120,9 @@ def schema_ready():
         db.q1("SELECT mail_date, delivery_status, error, attachments FROM email_archive LIMIT 1")
         db.q1("SELECT id, old_value, new_value FROM audit_log LIMIT 1")
         db.q1("SELECT name, pin_hash FROM app_users LIMIT 1")
+        db.q1("SELECT assigned_to, due_at, due_notified_at FROM alerts LIMIT 1")
+        db.q1("SELECT id FROM saved_views LIMIT 1")
+        db.q1("SELECT id FROM reply_templates LIMIT 1")
         return True
     except Exception:
         return False
@@ -1910,6 +1913,8 @@ def page_settings():
     flash("flash_settings")
     users_section()
     st.divider()
+    v2_ui.settings_notifications()
+    st.divider()
     st.subheader("General")
     with st.form("settings_form"):
         c1, c2 = st.columns(2)
@@ -2575,7 +2580,7 @@ def page_schedule():
                                                      "event": "What happened", "details": st.column_config.TextColumn("Details", width="large")})
 
 
-PAGES = {"🏠 Needs Attention": v2_ui.page_home, "📊 Dashboard": page_dashboard, "🔎 Alert Center": v2_ui.page_alert_center,
+PAGES = {"🏠 Needs Attention": v2_ui.page_home, "📊 Dashboard": page_dashboard, "🔎 Alert Center": v2_ui.page_alert_center, "🗂️ Work Queue": v2_ui.page_work_queue,
          "🎛️ Cap overview": page_cap_overview, "📅 Follow-ups": page_followups, "🎚️ Follow-up Control": v2_ui.page_followup_center, "🗓️ Schedule": page_schedule,
          "📑 Reports": page_reports, "📈 Operations Analytics": v2_ui.page_analytics,
          "🧑‍💼 Publishers": page_publishers, "👤 Publisher Profiles": lambda: v2_ui.page_entity_profiles("publisher"),
@@ -2584,6 +2589,23 @@ PAGES = {"🏠 Needs Attention": v2_ui.page_home, "📊 Dashboard": page_dashboa
          "📨 Email Center": v2_ui.page_email_center, "📝 Email templates": page_templates,
          "📜 Alert Log": page_log, "🧾 Audit Log": v2_ui.page_audit_log,
          "🔄 Sync & Import": page_sync, "⚙️ Settings": page_settings}
+
+def _open_hit(h):
+    """Jump from a search result to the right page."""
+    ss = st.session_state
+    if h["kind"] == "alert":
+        ss["v2_selected_alert_id"] = int(h["id"])
+        ss["page_v2"] = "🔎 Alert Center"
+    elif h["kind"] == "did":
+        ss["v2_lc_q"] = h.get("number") or ""
+        ss["page_v2"] = "♻️ DID Lifecycle"
+    elif h["kind"] == "publisher":
+        ss["v2_pref_publisher"] = h.get("name")
+        ss["page_v2"] = "👤 Publisher Profiles"
+    elif h["kind"] == "buyer":
+        ss["v2_pref_buyer"] = h.get("name")
+        ss["page_v2"] = "🏬 Buyer Profiles"
+
 
 LOGIN_ON = auth.login_required()
 if LOGIN_ON and not st.session_state.get("user"):
@@ -2638,20 +2660,17 @@ if mailer.is_dry_run():
 with st.sidebar:
     st.markdown("## P2C Alert Center")
     st.caption("Operations workspace")
-    _global_q = st.text_input("Quick alert search", placeholder="Alert ID, DID, publisher…", key="v2_global_search")
-    if st.button("Search alerts", use_container_width=True, key="v2_global_search_btn"):
-        _found = v2_features.search_alerts(_global_q, 30) if _global_q.strip() else []
-        st.session_state["v2_global_results"] = _found
-    _global_results = st.session_state.get("v2_global_results", [])
-    if _global_results:
-        _labels = [f"A{r['id']} · {r.get('publisher') or r.get('alert_type')} · {r.get('did') or ''}" for r in _global_results]
-        _ix = st.selectbox("Matching alerts", range(len(_labels)), format_func=lambda i: _labels[i], key="v2_global_pick")
-        if st.button("Open selected alert", type="primary", use_container_width=True, key="v2_global_open"):
-            st.session_state["v2_selected_alert_id"] = int(_global_results[_ix]["id"])
-            st.session_state["page_v2"] = "🔎 Alert Center"
-            st.rerun()
+    _global_q = st.text_input("Search everything", placeholder="A325 · DID · publisher · buyer · e-mail…", key="v2_global_search",
+                              help="Type and press Enter. Finds alerts, DIDs, publishers and buyers.")
+    if _global_q.strip():
+        _hits = v2_features.global_search(_global_q)
+        if not _hits:
+            st.caption("No match.")
+        for _i, _h in enumerate(_hits):
+            st.button(_h["title"] + (f" · {_h['sub']}" if _h.get("sub") else ""), key=f"gs_{_i}_{_h['kind']}_{_h['id']}", use_container_width=True,
+                      on_click=_open_hit, args=(_h,))
     st.divider()
-    NAV = {"Monitor": ["🏠 Needs Attention", "📊 Dashboard", "🔎 Alert Center", "🎛️ Cap overview"],
+    NAV = {"Monitor": ["🏠 Needs Attention", "📊 Dashboard", "🔎 Alert Center", "🗂️ Work Queue", "🎛️ Cap overview"],
            "Act": ["🎚️ Follow-up Control", "📅 Follow-ups", "🗓️ Schedule", "✅ My Tasks"],
            "Data": ["🧑‍💼 Publishers", "👤 Publisher Profiles", "🏢 Buyers", "🏬 Buyer Profiles", "📞 DIDs", "♻️ DID Lifecycle", "🚦 Caps"],
            "Insights": ["📑 Reports", "📈 Operations Analytics"],
