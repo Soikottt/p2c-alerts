@@ -223,7 +223,7 @@ CREATE TABLE IF NOT EXISTS inbound_emails (
   received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- V2: complete inbound email archive; the legacy inbound_emails table remains for compatibility.
+-- V2: complete inbound email archive, the legacy inbound_emails table remains for compatibility.
 CREATE TABLE IF NOT EXISTS email_archive (
   id BIGSERIAL PRIMARY KEY,
   message_id TEXT NOT NULL UNIQUE,
