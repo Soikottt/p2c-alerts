@@ -724,3 +724,100 @@ def page_entity_profiles(entity='publisher'):
         st.button('Open alert history', key=f'v2_{entity}_alert_open', on_click=_open_alert_center, args=(_selected,))
     else:
         st.caption('No matching alerts found.')
+
+
+# ---------------------------------------------------------------- Needs Attention (home)
+CHIP = {"green": ("#e7f6ee", "#14724a"), "red": ("#fdeaea", "#b42318"), "orange": ("#fff4e0", "#b54708"),
+        "blue": ("#e8f0fe", "#1d4ed8"), "gray": ("#eef1f5", "#475467")}
+
+
+def chip(text, colour="gray"):
+    bg, fg = CHIP.get(colour, CHIP["gray"])
+    return (f"<span style='background:{bg};color:{fg};padding:3px 10px;border-radius:999px;font-size:12px;"
+            f"font-weight:600;white-space:nowrap'>{html.escape(str(text))}</span>")
+
+
+def _go(page_name, alert_id=None):
+    if alert_id:
+        st.session_state["v2_selected_alert_id"] = int(alert_id)
+    st.session_state["page_v2"] = page_name
+
+
+def _section(title, count, colour):
+    st.markdown(f"<div style='display:flex;align-items:center;gap:10px;margin:2px 0 6px'><span style='font-weight:700;font-size:16px'>{html.escape(title)}</span>"
+                f"{chip(count, colour if count else 'green')}</div>", unsafe_allow_html=True)
+
+
+def page_home():
+    import followups
+    import mailer
+    now = db.now_utc()
+    st.markdown("## Needs attention")
+    st.caption("Everything that is waiting for you, in one place. Each line has one button.")
+    # health strip
+    ok = db.q1("SELECT MAX(finished_at) AS t FROM sync_runs WHERE kind='live' AND status='ok'")
+    t = db.to_dt(ok["t"]) if ok and ok["t"] else None
+    mins = int((now - t).total_seconds() // 60) if t else None
+    engine = chip("Engine: never ran", "red") if t is None else (chip(f"Engine OK · {mins} min ago", "green") if mins <= 15 else chip(f"Engine late · {mins} min", "red"))
+    ringba = chip("Ringba needs attention", "red") if db.get_setting('numbers_last_error', '') else chip("Ringba OK", "green")
+    inbox = chip("Inbox needs attention", "red") if db.get_setting('inbox_last_error', '') else chip("Inbox OK", "green")
+    mode = chip("DRY RUN: no real e-mails", "orange") if mailer.is_dry_run() else chip("Live sending", "green")
+    st.markdown(f"<div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px'>{engine}{ringba}{inbox}{mode}</div>", unsafe_allow_html=True)
+
+    failed = db.q("SELECT id, subject, to_emails, last_error, created_at FROM alerts WHERE status='failed' AND created_at > :t ORDER BY id DESC LIMIT 10", t=now - timedelta(days=7))
+    replies = db.q("""SELECT a.id, a.subject, MAX(n.created_at) AS last_reply, MAX(n.author) AS who FROM alert_notes n JOIN alerts a ON a.id=n.alert_id
+                      WHERE n.source='email' AND n.created_at > :t AND a.case_status IN ('open','follow_up','pending')
+                      GROUP BY a.id, a.subject ORDER BY MAX(n.created_at) DESC LIMIT 10""", t=now - timedelta(days=3))
+    try:
+        overdue = [r for r in followups.upcoming(now) if r.get("scheduled") and r.get("next_followup") and r["next_followup"] < now
+                   and not (r.get("paused_until") and r["paused_until"] > now)][:10]
+    except Exception:
+        overdue = []
+    silent = db.q("""SELECT id, subject, created_at, case_status FROM alerts WHERE alert_type IN ('did_inactive','did_new_no_calls')
+                     AND status='sent' AND case_status IN ('open','follow_up') ORDER BY id DESC LIMIT 10""")
+    c = st.columns(4)
+    c[0].metric("Failed e-mails", len(failed)); c[1].metric("Replies to read", len(replies))
+    c[2].metric("Overdue follow-ups", len(overdue)); c[3].metric("DIDs without answer", len(silent))
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        with st.container(border=True):
+            _section("Failed e-mails", len(failed), "red")
+            if not failed:
+                st.caption("All e-mails were delivered. 🎉")
+            for r in failed:
+                a, b = st.columns([4, 1])
+                a.markdown(f"**A{r['id']}** · {r['subject'] or ''}")
+                a.caption(f"{fmt(r['created_at'])} · {str(r.get('last_error') or '')[:90]}")
+                if b.button("Retry", key=f"home_retry_{r['id']}", use_container_width=True):
+                    mailer.retry_failed(r['id'])
+                    st.rerun()
+        with st.container(border=True):
+            _section("Overdue follow-ups", len(overdue), "orange")
+            if not overdue:
+                st.caption("Nothing is late.")
+            for r in overdue:
+                a, b = st.columns([4, 1])
+                a.markdown(f"**{r['code']}** · {r['did']} · {r['publisher']}")
+                a.caption(f"was due {fmt(r['next_followup'])}")
+                b.button("Open", key=f"home_fu_{r['did_id']}", use_container_width=True, on_click=_go, args=("🔎 Alert Center", int(r['extra']['root_id'])))
+            st.button("Manage all follow-ups", key="home_fu_all", on_click=_go, args=("🎚️ Follow-up Control",))
+    with right:
+        with st.container(border=True):
+            _section("New replies to read", len(replies), "blue")
+            if not replies:
+                st.caption("No unread replies.")
+            for r in replies:
+                a, b = st.columns([4, 1])
+                a.markdown(f"**A{r['id']}** · {r['subject'] or ''}")
+                a.caption(f"{fmt(r['last_reply'])} · {r.get('who') or ''}")
+                b.button("Open", key=f"home_rp_{r['id']}", use_container_width=True, on_click=_go, args=("🔎 Alert Center", int(r['id'])))
+        with st.container(border=True):
+            _section("DID alerts without an answer", len(silent), "orange")
+            if not silent:
+                st.caption("All DID alerts have an answer.")
+            for r in silent:
+                a, b = st.columns([4, 1])
+                a.markdown(f"**A{r['id']}** · {r['subject'] or ''}")
+                a.caption(f"{fmt(r['created_at'])} · {cases.label(r['case_status'])}")
+                b.button("Open", key=f"home_sl_{r['id']}", use_container_width=True, on_click=_go, args=("🔎 Alert Center", int(r['id'])))

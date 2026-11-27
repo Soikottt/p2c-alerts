@@ -2575,7 +2575,7 @@ def page_schedule():
                                                      "event": "What happened", "details": st.column_config.TextColumn("Details", width="large")})
 
 
-PAGES = {"📊 Dashboard": page_dashboard, "🔎 Alert Center": v2_ui.page_alert_center,
+PAGES = {"🏠 Needs Attention": v2_ui.page_home, "📊 Dashboard": page_dashboard, "🔎 Alert Center": v2_ui.page_alert_center,
          "🎛️ Cap overview": page_cap_overview, "📅 Follow-ups": page_followups, "🎚️ Follow-up Control": v2_ui.page_followup_center, "🗓️ Schedule": page_schedule,
          "📑 Reports": page_reports, "📈 Operations Analytics": v2_ui.page_analytics,
          "🧑‍💼 Publishers": page_publishers, "👤 Publisher Profiles": lambda: v2_ui.page_entity_profiles("publisher"),
@@ -2606,22 +2606,35 @@ if LOGIN_ON and not st.session_state.get("user"):
 if not LOGIN_ON:
     st.session_state.setdefault("user", "admin (no login)")
 
-# Clean light dashboard theme. Existing app logic and page functions remain unchanged.
+# Clean SaaS-style theme (look only; no logic).
 st.markdown("""<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 :root { color-scheme: light; }
+html, body, [class*="css"], [data-testid="stAppViewContainer"] { font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif; }
 [data-testid="stAppViewContainer"] { background: #f6f8fb; }
 [data-testid="stHeader"] { background: rgba(246,248,251,.92); }
+#MainMenu, footer { visibility: hidden; }
+.block-container { padding-top: 1.6rem; max-width: 1400px; }
+h1, h2, h3 { letter-spacing: -0.01em; color: #101828; }
 [data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #e5eaf1; }
-[data-testid="stMetric"] { background: #ffffff; border: 1px solid #e5eaf1; padding: 14px 16px; border-radius: 12px; }
-[data-testid="stVerticalBlockBorderWrapper"] { border-color: #e5eaf1 !important; border-radius: 12px !important; }
-.stButton > button { border-radius: 9px; font-weight: 600; }
+[data-testid="stSidebar"] .stButton > button { justify-content: flex-start; border: 0; background: transparent; box-shadow: none; font-weight: 500; color: #344054; padding: 6px 10px; }
+[data-testid="stSidebar"] .stButton > button:hover { background: #f2f4f7; color: #101828; }
+[data-testid="stSidebar"] .stButton > button[kind="primary"] { background: #e8f0fe; color: #1d4ed8; font-weight: 600; }
+[data-testid="stSidebar"] [data-testid="stExpander"] { border: 0; }
+[data-testid="stMetric"] { background: #ffffff; border: 1px solid #e5eaf1; padding: 14px 16px; border-radius: 12px; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
+[data-testid="stMetricLabel"] { color: #667085; font-weight: 500; }
+[data-testid="stMetricValue"] { font-weight: 700; color: #101828; }
+[data-testid="stVerticalBlockBorderWrapper"] { border-color: #e5eaf1 !important; border-radius: 12px !important; background: #ffffff; box-shadow: 0 1px 2px rgba(16,24,40,.04); }
+.stButton > button, .stDownloadButton > button { border-radius: 9px; font-weight: 600; }
+.stButton > button[kind="primary"] { background: #1d4ed8; border-color: #1d4ed8; }
 [data-testid="stDataFrame"], [data-testid="stDataEditor"] { border: 1px solid #e5eaf1; border-radius: 10px; overflow: hidden; }
-[data-testid="stExpander"] { border: 1px solid #e5eaf1; border-radius: 10px; }
+[data-testid="stExpander"] { border: 1px solid #e5eaf1; border-radius: 10px; background: #fff; }
+.stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid #e5eaf1; }
+.stTabs [data-baseweb="tab"] { font-weight: 600; }
 </style>""", unsafe_allow_html=True)
 
 if mailer.is_dry_run():
     st.warning("🧪 DRY RUN is ON: alerts are created but emails are NOT really sent. Turn it off in Settings when you are ready.")
-st.title("Pay-Per-Call Alert Center")
 with st.sidebar:
     st.markdown("## P2C Alert Center")
     st.caption("Operations workspace")
@@ -2638,11 +2651,24 @@ with st.sidebar:
             st.session_state["page_v2"] = "🔎 Alert Center"
             st.rerun()
     st.divider()
-    st.caption("NAVIGATION")
-    _page_options = list(PAGES)
-    if st.session_state.get("page_v2") not in _page_options:
-        st.session_state["page_v2"] = "📊 Dashboard"
-    page = st.selectbox("Open workspace", _page_options, key="page_v2", label_visibility="collapsed")
+    NAV = {"Monitor": ["🏠 Needs Attention", "📊 Dashboard", "🔎 Alert Center", "🎛️ Cap overview"],
+           "Act": ["🎚️ Follow-up Control", "📅 Follow-ups", "🗓️ Schedule", "✅ My Tasks"],
+           "Data": ["🧑‍💼 Publishers", "👤 Publisher Profiles", "🏢 Buyers", "🏬 Buyer Profiles", "📞 DIDs", "♻️ DID Lifecycle", "🚦 Caps"],
+           "Insights": ["📑 Reports", "📈 Operations Analytics"],
+           "Email & logs": ["📨 Email Center", "✉️ Emails", "📝 Email templates", "📜 Alert Log", "🧾 Audit Log"],
+           "System": ["🔄 Sync & Import", "⚙️ Settings"]}
+    if st.session_state.get("page_v2") not in PAGES:
+        st.session_state["page_v2"] = "🏠 Needs Attention"
+    page = st.session_state["page_v2"]
+
+    def _nav_to(name):
+        st.session_state["page_v2"] = name
+    for _grp, _items in NAV.items():
+        with st.expander(_grp, expanded=page in _items):
+            for _name in _items:
+                if _name in PAGES:
+                    st.button(_name.split(" ", 1)[1], key=f"nav_{_name}", use_container_width=True,
+                              type="primary" if _name == page else "secondary", on_click=_nav_to, args=(_name,))
     st.caption(f"👤 {st.session_state.get('user')}")
     if LOGIN_ON and st.button("Sign out", key="signout", use_container_width=True):
         audit.log("logout", "user", st.session_state.get("user"))
