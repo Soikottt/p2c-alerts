@@ -1,6 +1,6 @@
-"""Full e-mail archive: every outgoing alert e-mail and every incoming reply, complete (text + HTML + headers + attachment info).
-Never raises: a problem here must never stop sending or reading mail."""
-import email
+"""Full e-mail archive in ONE table (email_archive): every incoming reply and every outgoing alert e-mail, complete
+(text + HTML + headers + attachment info + delivery status). Never raises: a problem here must never stop sending or reading mail.
+direction is 'inbound' or 'outbound' (older rows from an earlier version may say 'in' / 'out': IN_DIRS / OUT_DIRS cover both)."""
 import json
 import re
 from email.header import decode_header, make_header
@@ -9,6 +9,8 @@ from email.utils import getaddresses, parsedate_to_datetime
 import db
 
 MAX_BODY = 1_000_000
+IN_DIRS = ("inbound", "in")
+OUT_DIRS = ("outbound", "out")
 
 
 def _dec(v):
@@ -33,6 +35,11 @@ def _utc(s):
         return None
 
 
+def clean_text(s):
+    """PostgreSQL cannot store a NUL character; some e-mails contain one."""
+    return str(s or "").replace("\x00", "")
+
+
 def out_message_id(alert_id):
     """The same Message-ID the mailer puts on the e-mail (replies point to it)."""
     try:
@@ -48,15 +55,15 @@ def record_out(a, status, error=None, message_id=None):
     """One row per alert e-mail. Called when it is sent, fails or is a dry run; later calls update the delivery status."""
     try:
         mid = message_id or out_message_id(a["id"])
-        row = dict(m=mid, al=a["id"], s=a.get("subject"), f=a.get("from_email"), t=a.get("to_emails"), c=a.get("cc_emails"),
-                   bt=a.get("body"), bh=a.get("body_html"), irt=None, rf=None, dt=a.get("sent_at") or a.get("created_at"),
-                   st=status, er=(str(error)[:500] if error else None), now=db.now_utc())
-        if a.get("thread_id"):
-            row["irt"] = f"alert {a['thread_id']}"
+        when = a.get("sent_at") or a.get("created_at") or db.now_utc()
         db.x("INSERT INTO email_archive (message_id, direction, alert_id, subject, from_email, to_emails, cc_emails, body_text, body_html, "
-             "in_reply_to, references_hdr, mail_date, delivery_status, error, created_at) "
-             "VALUES (:m,'out',:al,:s,:f,:t,:c,:bt,:bh,:irt,:rf,:dt,:st,:er,:now) "
-             "ON CONFLICT (message_id) DO UPDATE SET delivery_status=:st, error=:er, to_emails=:t, cc_emails=:c, mail_date=COALESCE(:dt, email_archive.mail_date)", **row)
+             "received_at, mail_date, delivery_status, error) "
+             "VALUES (:m,'outbound',:al,:s,:f,:t,:c,:bt,:bh,:dt,:dt,:st,:er) "
+             "ON CONFLICT (message_id) DO UPDATE SET delivery_status=:st, error=:er, direction='outbound', "
+             "to_emails=COALESCE(:t, email_archive.to_emails), cc_emails=COALESCE(:c, email_archive.cc_emails)",
+             m=mid, al=a["id"], s=a.get("subject"), f=a.get("from_email"), t=a.get("to_emails"), c=a.get("cc_emails"),
+             bt=clean_text(a.get("body")), bh=clean_text(a.get("body_html")) or None, dt=when,
+             st=status, er=(str(error)[:500] if error else None))
         return True
     except Exception:
         return False
@@ -88,27 +95,27 @@ def parse_message(msg):
     if not t and h:
         t = re.sub(r"\s+\n", "\n", re.sub(r"<[^>]+>", " ", re.sub(r"(?is)<(script|style).*?</\1>", "", h)))
         t = re.sub(r"[ \t]+", " ", t).strip()
-    return t[:MAX_BODY], h[:MAX_BODY], atts
+    return clean_text(t)[:MAX_BODY], clean_text(h)[:MAX_BODY], atts
 
 
-def record_in(msg, mid, alert_id, outcome):
-    """Store a complete incoming e-mail. `msg` is an email.message.Message (full)."""
+def record_in(msg, mid, alert_id, outcome, received=None):
+    """Store a complete incoming e-mail. `msg` is an email.message.Message (full). Returns True / False, never raises."""
     try:
         t, h, atts = parse_message(msg)
         db.x("INSERT INTO email_archive (message_id, direction, alert_id, subject, from_email, to_emails, cc_emails, body_text, body_html, "
-             "in_reply_to, references_hdr, mail_date, delivery_status, attachments, outcome, created_at) "
-             "VALUES (:m,'in',:al,:s,:f,:t,:c,:bt,:bh,:irt,:rf,:dt,'received',:at,:o,:now) "
+             "in_reply_to, references_header, mail_date, delivery_status, attachments, outcome, received_at) "
+             "VALUES (:m,'inbound',:al,:s,:f,:t,:c,:bt,:bh,:irt,:rf,:dt,'received',:at,:o,:rc) "
              "ON CONFLICT (message_id) DO UPDATE SET outcome=:o, alert_id=:al",
-             m=mid, al=alert_id, s=_dec(msg.get("Subject")), f=_addrs(msg.get("From")), t=_addrs(msg.get("To")), c=_addrs(msg.get("Cc")),
-             bt=t, bh=h, irt=(msg.get("In-Reply-To") or "").strip() or None, rf=(msg.get("References") or "").strip() or None,
-             dt=_utc(msg.get("Date")), at=json.dumps(atts) if atts else None, o=outcome, now=db.now_utc())
+             m=mid, al=alert_id, s=clean_text(_dec(msg.get("Subject"))), f=_addrs(msg.get("From")), t=_addrs(msg.get("To")), c=_addrs(msg.get("Cc")),
+             bt=t, bh=h, irt=clean_text((msg.get("In-Reply-To") or "").strip()) or None, rf=clean_text((msg.get("References") or "").strip()) or None,
+             dt=_utc(msg.get("Date")), at=json.dumps(atts) if atts else None, o=outcome, rc=received or db.now_utc())
         return True
     except Exception:
         return False
 
 
 def for_alert(alert_id):
-    return db.q("SELECT * FROM email_archive WHERE alert_id=:a ORDER BY COALESCE(mail_date, created_at) DESC, id DESC", a=alert_id)
+    return db.q("SELECT * FROM email_archive WHERE alert_id=:a ORDER BY received_at DESC, id DESC", a=alert_id)
 
 
 def backfill(batch=500):
@@ -117,18 +124,17 @@ def backfill(batch=500):
         return 0
     n = 0
     last = 0
-    have = {r["alert_id"] for r in db.q("SELECT alert_id FROM email_archive WHERE direction='out'")}
+    have = {r["alert_id"] for r in db.q("SELECT alert_id FROM email_archive WHERE direction IN ('outbound','out') AND alert_id IS NOT NULL")}
     while True:
-        rows = db.q("SELECT id, subject, to_emails, cc_emails, body, body_html, status, last_error, sent_at, created_at, thread_id FROM alerts "
+        rows = db.q("SELECT id, subject, to_emails, cc_emails, body, body_html, status, last_error, sent_at, created_at FROM alerts "
                     "WHERE id > :l ORDER BY id LIMIT :n", l=last, n=batch)
         if not rows:
             break
         for a in rows:
             last = a["id"]
-            if a["id"] in have:
+            if a["id"] in have or a["status"] not in ("sent", "failed", "dry_run", "pending"):
                 continue
-            if a["status"] in ("sent", "failed", "dry_run", "pending"):
-                if record_out(a, a["status"], a.get("last_error")):
-                    n += 1
+            if record_out(a, a["status"], a.get("last_error")):
+                n += 1
     db.set_setting("archive_backfilled", "1")
     return n

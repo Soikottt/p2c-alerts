@@ -198,4 +198,6 @@ def delete_alerts(ids, also_resume_pauses=True):
         deleted += db.x_in("DELETE FROM alerts WHERE id IN :ids", "ids", part)
         if also_resume_pauses and keys:
             db.x_in("DELETE FROM snoozes WHERE entity_key IN :ks", "ks", keys)
+        import audit
+        audit.log("alerts_deleted", "alert", f"{part[0]}..{part[-1]}", detail=f"{len(part)} alerts deleted (pauses resumed: {bool(also_resume_pauses)})")
     return deleted

@@ -148,18 +148,13 @@ def sync_replies(days=14, scan=300, max_seconds=45):
                                          "history": alerts.answer_history(aid)}, thread_id=aid, cc_extra=[addr])
                     outcome = "saved"
             received = db.now_utc()
-            # Keep the complete original message separately from the shortened reply note.
-            # The existing inbound_emails table remains untouched for backward compatibility.
-            db.x("""INSERT INTO email_archive
-                    (message_id, alert_id, direction, from_email, to_emails, cc_emails, subject,
-                     body_text, body_html, in_reply_to, references_header, outcome, received_at)
-                    VALUES (:m,:a,'inbound',:f,:to,:cc,:sub,:txt,:html,:irt,:refs,:o,:n)
-                    ON CONFLICT (message_id) DO NOTHING""",
-                 m=mid, a=aid, f=addr, to=to_header, cc=cc_header, sub=subject_full,
-                 txt=full_text, html=full_html, irt=(msg.get("In-Reply-To") or ""),
-                 refs=(msg.get("References") or ""), o=outcome, n=received)
             db.x("INSERT INTO inbound_emails (message_id, alert_id, from_email, outcome, received_at) VALUES (:m,:a,:f,:o,:n)",
                  m=mid, a=aid, f=addr, o=outcome, n=received)
+            try:
+                import archive
+                archive.record_in(msg, mid, aid, outcome, received)      # the full original message; never raises
+            except Exception:
+                pass
             try:
                 import v2_features
                 v2_features.audit("inbound_email_archived", f"Incoming email archived: {subject_full}", alert_id=aid,

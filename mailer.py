@@ -141,6 +141,25 @@ def _drop_for_retired_dids(rows, res):
 CLAIM_MINUTES = 10
 
 
+def _archive(a, status, error=None, message_id=None):
+    try:
+        import archive
+        archive.record_out(dict(a), status, error, message_id)
+    except Exception:
+        pass
+
+
+def retry_failed(alert_id):
+    """Safe retry: only an alert that is 'failed' goes back to the queue (never a sent one, so no double sending)."""
+    n = db.x("UPDATE alerts SET status='pending', attempts=0, last_error=NULL, claimed_at=NULL WHERE id=:i AND status='failed'", i=int(alert_id))
+    try:
+        import audit
+        audit.log("email_retry", "alert", alert_id, alert_id=alert_id, detail="Failed e-mail put back in the queue")
+    except Exception:
+        pass
+    return bool(n)
+
+
 def _sent_set(a):
     return {x.strip().lower() for x in str(a.get("sent_to") or "").split(",") if x.strip()}
 
@@ -210,6 +229,7 @@ def process_outbox(limit=25, max_seconds=None):
                 print(f"--- DRY RUN (not sent) ---\nTo: {', '.join(to)}\nCC: {', '.join(cc)}\n"
                       f"Subject: {a['subject']}\n{a['body']}\n", flush=True)
                 db.x("UPDATE alerts SET status='dry_run', last_error=NULL, claimed_at=NULL WHERE id=:i", i=a["id"])
+                _archive(a, "dry_run")
                 res["dry_run"] += 1
                 continue
             done = _sent_set(a)
@@ -230,6 +250,7 @@ def process_outbox(limit=25, max_seconds=None):
                 sent_at = db.now_utc()
                 db.x("UPDATE alerts SET status='sent', sent_at=:n, attempts=attempts+1, last_error=NULL, sent_to=:s WHERE id=:i",
                      n=sent_at, s=",".join(sorted(done)), i=a["id"])
+                _archive(a, "sent", message_id=hdr.get("Message-ID"))
                 try:
                     import v2_features
                     v2_features.audit("email_sent", f"Email sent: {a['subject']}", alert_id=a["id"], details=f"to={a.get('to_emails') or ''}; cc={a.get('cc_emails') or ''}")
@@ -242,6 +263,7 @@ def process_outbox(limit=25, max_seconds=None):
                 status = "failed" if attempts >= MAX_ATTEMPTS else "pending"
                 db.x("UPDATE alerts SET status=:s, attempts=:a, last_error=:e, claimed_at=NULL, sent_to=:t WHERE id=:i",
                      s=status, a=attempts, e=str(e)[:500], t=",".join(sorted(done)) or None, i=a["id"])
+                _archive(a, "failed" if status == "failed" else "retrying", error=str(e)[:500])
                 try:
                     import v2_features
                     v2_features.audit("email_failed", f"Email delivery failed: {a['subject']}", alert_id=a["id"], details=str(e)[:1000])

@@ -201,6 +201,9 @@ def ensure_columns():
         db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count, cc_emails FROM tasks LIMIT 1")
         db.q1("SELECT watchlist FROM targets LIMIT 1")
         db.q1("SELECT all_alerts FROM affiliate_managers LIMIT 1")
+        db.q1("SELECT mail_date, delivery_status, error, attachments FROM email_archive LIMIT 1")
+        db.q1("SELECT actor, old_value, new_value FROM audit_log LIMIT 1")
+        db.q1("SELECT pin_hash FROM app_users LIMIT 1")
         db.q1("SELECT event FROM task_log LIMIT 1")
         db.q1("SELECT day, paid FROM daily_stats LIMIT 1")
         db.q1("SELECT day FROM insight_days LIMIT 1")
@@ -269,12 +272,24 @@ def run(log=print, schema_file=None, migrate=True):
         db.x(stmt)
     _add_columns()
     _migrate_managers()
+    try:
+        import v2_features
+        v2_features.ensure_schema()                      # V2 / archive / audit / users columns on tables that already exist
+    except Exception as e:
+        log(f"  (V2 tables: {e})")
     log("  tables are ready")
     if migrated:
         log("Copying your useful old settings into the new tables ...")
         _copy_old_data(log)
     seed(log)
     log("  default alert rules and settings are in place")
+    try:
+        import archive
+        n = archive.backfill()
+        if n:
+            log(f"  e-mail archive: {n} earlier alert e-mails copied in (old replies keep their short form)")
+    except Exception as e:
+        log(f"  (e-mail archive copy skipped: {e})")
     log("DONE. Database is ready.")
 
 

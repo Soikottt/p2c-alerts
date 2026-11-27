@@ -18,6 +18,9 @@ if not config.DB_URL:
 
 import actions
 import alerts
+import archive
+import audit
+import auth
 import backup
 import cases
 import db
@@ -114,6 +117,9 @@ def schema_ready():
         db.q1("SELECT title, alert_time, repeat_days, repeat_rule, last_alert_at, alert_count FROM tasks LIMIT 1")
         db.q1("SELECT day, paid FROM daily_stats LIMIT 1")
         db.q1("SELECT day FROM insight_days LIMIT 1")
+        db.q1("SELECT mail_date, delivery_status, error, attachments FROM email_archive LIMIT 1")
+        db.q1("SELECT id, old_value, new_value FROM audit_log LIMIT 1")
+        db.q1("SELECT name, pin_hash FROM app_users LIMIT 1")
         return True
     except Exception:
         return False
@@ -212,6 +218,8 @@ def save_table(table, orig, edited, display_cols, pk="id", transform=None, requi
                 cols = list(vals)
                 db.x(f"INSERT INTO {table} ({','.join(cols)}) VALUES ({','.join(':' + c for c in cols)})", **vals)
                 done["added"] += 1
+                audit.log("added", table, disp.get("name") or disp.get("number") or label,
+                          new=json.dumps({k: v for k, v in disp.items() if v not in (None, "")}, default=str)[:500])
             else:
                 seen.add(pkv)
                 before = orig_rows.get(pkv)
@@ -224,13 +232,10 @@ def save_table(table, orig, edited, display_cols, pk="id", transform=None, requi
                 sets = ",".join(f"{c}=:{c}" for c in vals)
                 db.x(f"UPDATE {table} SET {sets} WHERE {pk}=:__pk", __pk=pkv, **vals)
                 done["changed"] += 1
-                if table == "dids" and before is not None and disp.get("status") != before.get("status"):
-                    try:
-                        import v2_features
-                        v2_features.audit("did_status_changed", f"DID {disp.get('number') or pkv} status changed: {before.get('status')} → {disp.get('status')}",
-                                          entity_type="did", entity_id=pkv)
-                    except Exception:
-                        pass
+                for c in display_cols:                         # one audit line per changed field: who, before, after
+                    if before is not None and not same(disp[c], before[c]):
+                        audit.log("changed", table, pkv, did_id=pkv if table == "dids" else None,
+                                  old=str(before.get(c))[:200], new=str(disp.get(c))[:200], detail=c)
         except Exception as e:
             msg = str(e).split("\n")[0][:200]
             if "unique" in msg.lower() or "duplicate" in msg.lower():
@@ -241,6 +246,7 @@ def save_table(table, orig, edited, display_cols, pk="id", transform=None, requi
             try:
                 db.x(f"DELETE FROM {table} WHERE {pk}=:p", p=pkv)
                 done["deleted"] += 1
+                audit.log("deleted", table, pkv, did_id=pkv if table == "dids" else None, old=json.dumps(orig_rows.get(pkv), default=str)[:500])
             except Exception as e:
                 done["errors"].append(f"{orig_rows[pkv].get('name') or pkv}: cannot delete ({str(e)[:80]}) - set its status instead")
     return done
@@ -459,14 +465,19 @@ def page_dashboard():
     # V2 operations snapshot: compact, action-oriented metrics above the existing Ringba dashboard.
     needs = db.q1("SELECT COUNT(*) AS n FROM alerts WHERE alert_type <> 'alert_response' AND (status='failed' OR case_status IN ('follow_up','pending','in_progress'))")
     waiting = db.q1("SELECT COUNT(*) AS n FROM alerts WHERE alert_type <> 'alert_response' AND case_status='waiting'")
-    failed_mail = db.q1("SELECT COUNT(*) AS n FROM alerts WHERE status='failed'")
+    failed_mail = db.q1("SELECT COUNT(*) AS n FROM alerts WHERE status='failed' AND created_at > :t", t=now - timedelta(days=7))
     active_did = db.q1("SELECT COUNT(*) AS n FROM dids WHERE status='active'")
     st.subheader("Operations at a glance")
     _k = st.columns(4)
     _k[0].metric("Needs attention", f"{int((needs or {}).get('n') or 0):,}")
     _k[1].metric("Waiting for update", f"{int((waiting or {}).get('n') or 0):,}")
-    _k[2].metric("Failed emails", f"{int((failed_mail or {}).get('n') or 0):,}")
+    _k[2].metric("Failed emails (7 days)", f"{int((failed_mail or {}).get('n') or 0):,}")
     _k[3].metric("Active DIDs", f"{int((active_did or {}).get('n') or 0):,}")
+    _b = st.columns(4)
+    _b[0].button("Open follow-ups", key="dash_go_fu", use_container_width=True, on_click=lambda: st.session_state.__setitem__("page_v2", "🎚️ Follow-up Control"))
+    _b[1].button("Open alert log", key="dash_go_log", use_container_width=True, on_click=lambda: st.session_state.__setitem__("page_v2", "📜 Alert Log"))
+    _b[2].button("Open failed e-mails", key="dash_go_fail", use_container_width=True, on_click=lambda: st.session_state.__setitem__("page_v2", "📨 Email Center"))
+    _b[3].button("Open DID lifecycle", key="dash_go_did", use_container_width=True, on_click=lambda: st.session_state.__setitem__("page_v2", "♻️ DID Lifecycle"))
     _health = st.columns(3)
     _health[0].caption("Ringba: " + ("Connected" if not db.get_setting('numbers_last_error','') else "Needs attention"))
     _health[1].caption("Inbox: " + ("Connected" if not db.get_setting('inbox_last_error','') else "Needs attention"))
@@ -1766,6 +1777,8 @@ def page_log():
             for r in sn:
                 if r["what"] in pick:
                     db.x("DELETE FROM snoozes WHERE entity_key=:k", k=r["entity_key"])
+                    _k = r["entity_key"]
+                    audit.log("followup_resumed", "snooze", _k, did_id=int(_k[4:]) if _k.startswith("did:") and _k[4:].isdigit() else None, detail=r["what"])
             set_flash("flash_log", "ok", f"Resumed {len(pick)}.")
             st.rerun()
 
@@ -1850,8 +1863,53 @@ def page_sync():
 
 
 # ================================================================== SETTINGS
+def users_section():
+    if LOGIN_ON and st.session_state.get("user_role") != "admin":
+        st.subheader("Users")
+        st.info("Only an admin can add users, change PINs or switch users off.")
+        return
+    st.subheader("Users (name + PIN login)")
+    st.caption("When at least one user exists, the app asks for name + PIN. Create your own admin FIRST. The secret ADMIN_PIN (optional) always opens the user "
+               "'admin', so you can never be locked out. PINs are stored scrambled, nobody can read them.")
+    us = auth.users()
+    if us:
+        show_df("users", pd.DataFrame([{"name": u["name"], "role": u["role"], "active": bool(u["active"]), "created": fmt(u["created_at"])} for u in us]))
+    with st.form("user_add", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        nm = c1.text_input("Name")
+        pin = c2.text_input("PIN (4+ characters)", type="password")
+        role = c3.selectbox("Role", ["admin", "user"])
+        if st.form_submit_button("Add user"):
+            try:
+                auth.create_user(nm, pin, role); auth.forget_cache()
+                audit.log("user_added", "user", nm, new=role)
+                st.success("User added." + ("" if us else " Login is now required: you will be asked for name + PIN on the next page load."))
+            except ValueError as e:
+                st.error(str(e))
+    if us:
+        c1, c2, c3 = st.columns(3)
+        who = c1.selectbox("User", [u["name"] for u in us], key="usr_pick")
+        newpin = c2.text_input("New PIN", type="password", key="usr_newpin")
+        if c3.button("Change PIN", key="usr_setpin"):
+            try:
+                auth.set_pin(who, newpin); audit.log("user_pin_changed", "user", who); st.success("PIN changed.")
+            except ValueError as e:
+                st.error(str(e))
+        d1, d2 = st.columns(2)
+        if d1.button("Switch on / off", key="usr_toggle"):
+            cur = next(u for u in us if u["name"] == who)
+            auth.set_active(who, not cur["active"]); auth.forget_cache(); audit.log("user_active", "user", who, new=str(not cur["active"])); st.rerun()
+        if d2.button("Delete user", key="usr_del"):
+            if len(us) <= 1 and not auth.admin_pin():
+                st.error("This is the only user. Add another one first (or set ADMIN_PIN).")
+            else:
+                auth.delete_user(who); auth.forget_cache(); audit.log("user_deleted", "user", who); st.rerun()
+
+
 def page_settings():
     flash("flash_settings")
+    users_section()
+    st.divider()
     st.subheader("General")
     with st.form("settings_form"):
         c1, c2 = st.columns(2)
@@ -2518,14 +2576,35 @@ def page_schedule():
 
 
 PAGES = {"📊 Dashboard": page_dashboard, "🔎 Alert Center": v2_ui.page_alert_center,
-         "🎛️ Cap overview": page_cap_overview, "📅 Follow-ups": page_followups, "🗓️ Schedule": page_schedule,
+         "🎛️ Cap overview": page_cap_overview, "📅 Follow-ups": page_followups, "🎚️ Follow-up Control": v2_ui.page_followup_center, "🗓️ Schedule": page_schedule,
          "📑 Reports": page_reports, "📈 Operations Analytics": v2_ui.page_analytics,
          "🧑‍💼 Publishers": page_publishers, "👤 Publisher Profiles": lambda: v2_ui.page_entity_profiles("publisher"),
          "🏢 Buyers": page_buyers, "🏬 Buyer Profiles": lambda: v2_ui.page_entity_profiles("buyer"),
-         "📞 DIDs": page_dids, "🚦 Caps": page_caps, "✅ My Tasks": page_tasks, "✉️ Emails": page_emails,
+         "♻️ DID Lifecycle": v2_ui.page_did_lifecycle, "📞 DIDs": page_dids, "🚦 Caps": page_caps, "✅ My Tasks": page_tasks, "✉️ Emails": page_emails,
          "📨 Email Center": v2_ui.page_email_center, "📝 Email templates": page_templates,
          "📜 Alert Log": page_log, "🧾 Audit Log": v2_ui.page_audit_log,
          "🔄 Sync & Import": page_sync, "⚙️ Settings": page_settings}
+
+LOGIN_ON = auth.login_required()
+if LOGIN_ON and not st.session_state.get("user"):
+    st.title("📞 Pay-Per-Call Alert Center")
+    st.subheader("🔐 Sign in")
+    with st.form("login_form"):
+        ln = st.text_input("Name")
+        lp = st.text_input("PIN", type="password")
+        go_login = st.form_submit_button("Sign in", type="primary")
+    if go_login:
+        u = auth.check(ln, lp)
+        if u:
+            st.session_state["user"] = u["name"]
+            st.session_state["user_role"] = u["role"]
+            audit.log("login", "user", u["name"], who=u["name"])
+            st.rerun()
+        else:
+            st.error("Wrong name or PIN.")
+    st.stop()
+if not LOGIN_ON:
+    st.session_state.setdefault("user", "admin (no login)")
 
 # Clean light dashboard theme. Existing app logic and page functions remain unchanged.
 st.markdown("""<style>
@@ -2561,7 +2640,15 @@ with st.sidebar:
     st.divider()
     st.caption("NAVIGATION")
     _page_options = list(PAGES)
-    page = st.selectbox("Open workspace", _page_options, index=_page_options.index(st.session_state.get("page_v2", "📊 Dashboard")) if st.session_state.get("page_v2", "📊 Dashboard") in _page_options else 0, key="page_v2", label_visibility="collapsed")
+    if st.session_state.get("page_v2") not in _page_options:
+        st.session_state["page_v2"] = "📊 Dashboard"
+    page = st.selectbox("Open workspace", _page_options, key="page_v2", label_visibility="collapsed")
+    st.caption(f"👤 {st.session_state.get('user')}")
+    if LOGIN_ON and st.button("Sign out", key="signout", use_container_width=True):
+        audit.log("logout", "user", st.session_state.get("user"))
+        for _k in ("user", "user_role"):
+            st.session_state.pop(_k, None)
+        st.rerun()
     if st.button("🔄 Refresh", key="refresh_page", help="Reload this page with the newest data", use_container_width=True):
         try:
             db._memo.clear()

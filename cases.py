@@ -27,9 +27,8 @@ def add_note(alert_id, source, author, text, status=None):
     db.x("INSERT INTO alert_notes (alert_id, source, author, text, status_after, created_at) VALUES (:a,:s,:w,:t,:st,:n)",
          a=alert_id, s=source, w=clean_author, t=clean_text, st=status, n=now)
     try:
-        import v2_features
-        v2_features.audit("note_added", clean_text or f"{source} activity", alert_id=alert_id, actor=clean_author,
-                          details=f"source={source}; status_after={status or ''}")
+        import audit
+        audit.log("note_added", "alert", alert_id, alert_id=alert_id, detail=f"{source}: {clean_text[:300]}", who=clean_author)
     except Exception:
         pass
     if status:
@@ -43,8 +42,8 @@ def set_status(alert_id, status, now=None):
         db.x("UPDATE alerts SET case_status=:s, case_updated_at=:n WHERE id=:i", s=status, n=now or db.now_utc(), i=alert_id)
         if old != status:
             try:
-                import v2_features
-                v2_features.audit("status_changed", f"Team status changed: {old} → {status}", alert_id=alert_id)
+                import audit
+                audit.log("status_change", "alert", alert_id, alert_id=alert_id, old=old, new=status)
             except Exception:
                 pass
 

@@ -314,6 +314,8 @@ def iso(d):
 def log(task_id, title, event, detail=""):
     db.x("INSERT INTO task_log (task_id, task_title, at, event, detail) VALUES (:i,:t,:n,:e,:d)",
          i=task_id, t=title, n=db.now_utc(), e=event, d=detail)
+    import audit
+    audit.log("task_" + str(event), "task", task_id, detail=f"{title}: {detail}"[:500])
 
 
 def add_task(title, notes="", work_date=None, alert_date=None, repeat="none", alert_time=None, repeat_days=None, repeat_rule=None, now=None, cc_emails=""):
